@@ -4,20 +4,9 @@ A Claude Code mod that turns Claude's file operations into a **live, animated ma
 A sidebar pane shows the project tree and animates every file as Claude reads, edits, creates or
 deletes it, so you can see at a glance where Claude is working right now.
 
-```
-✻ work-map ~/my-app
-❯ editing src/auth/session.ts 2.4s █
-── tree ─────────────────────────────────
- ▾ src/ ●
- ├╴▾ auth/ ●
-▌│ └╴✎ session.ts ▏ ╌╌╌╌╌╌╌╌◂ editing
- ├╴▾ components/ ·
- │ ├╴◉ Modal.tsx
- │ └╴✓ Button.tsx
- └╴· index.ts
-── legend ───────────────────────────────
-◉ read  ✎ edit  + new  ✗ delete
-```
+<p align="center">
+  <img src="docs/media/demo.gif" alt="The work map following Claude through a session: reading two files, editing one, creating a component, editing an index, deleting a file, then the completion card" width="446">
+</p>
 
 ## Features
 
@@ -46,16 +35,34 @@ deletes it, so you can see at a glance where Claude is working right now.
 - When it's on, the pane opens by itself at session start once the terminal is at least 144
   columns wide. `/watch` opens it at any width.
 - Closing the pane by hand also turns watching off. The next `/watch` reopens it.
-- While a tool runs, the status line also shows the current operation, e.g. `✎ edit src/app.ts`.
+- While a tool runs, the status line also shows the current operation, e.g. `± edit src/app.ts`.
 
 ## Visual language
 
 | Glyph | Operation | Colour | While running | After |
 | --- | --- | --- | --- | --- |
 | `◉` | read | blue | a band of light sweeps across the name | `✓`, colour fades |
-| `✎` | edit | orange | a ripple runs along the name, then a blinking cursor `▏` | `✓`, colour fades |
+| `±` | edit | orange | a ripple runs along the name, then a blinking cursor `▏` | `✓`, colour fades |
 | `+` | create | green | the name types itself in, then glows | settles into the tree |
 | `✗` | delete | red | red pulse | highlight → damped shake → removed letter by letter |
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/media/read.png" alt="Reading: a band of light sweeps across session.ts" width="300"><br><sub><b>Reading</b>: the scan band sweeps the name</sub></td>
+    <td align="center"><img src="docs/media/edit.png" alt="Editing: session.ts pulses orange, with the lit path from src/ down to it" width="300"><br><sub><b>Editing</b>: ripple, cursor and lit path</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/media/create.png" alt="Creating: UserProfile.tsx types itself into the tree" width="300"><br><sub><b>Creating</b>: the name types itself in</sub></td>
+    <td align="center"><img src="docs/media/delete.png" alt="Deleting: legacy.ts flashes red before it leaves the tree" width="300"><br><sub><b>Deleting</b>: red pulse, then shake and dissolve</sub></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><img src="docs/media/complete.png" alt="The completion card: 3 viewed, 2 edited, 1 created, 1 deleted, with bars" width="300"><br><sub><b>Task complete</b>: the trail of the turn and its summary</sub></td>
+  </tr>
+</table>
+
+<sub>The GIF and screenshots are rendered from the plugin's own drawing code (`hooks/model.ts`) by
+[`scripts/render-media.mjs`](scripts/render-media.mjs), so they show exactly what the pane draws,
+frame by frame.</sub>
 
 See [docs/visual-language.md](docs/visual-language.md) for the full timelines and colours.
 
@@ -127,7 +134,7 @@ load it in every session without installing it, add the folder's absolute path t
 ### Check that it works
 
 1. Start Claude Code in any project and run `/watch`. The pane should show
-   `✻ work-map ~/<your project>` and the project tree.
+   `✶ work-map ~/<your project>` and the project tree.
 2. Ask Claude to read or edit a file. That file should light up as Claude works on it.
 
 If nothing appears, start Claude Code with `claude --debug`. The debug log names the plugin and the
@@ -147,6 +154,8 @@ claude-work-visualized/
 │   └── work.test.tsx            tests
 ├── types/index.d.ts             types for the data the mod keeps in session state
 ├── docs/                        documentation
+│   └── media/                   README screenshots and GIF
+├── scripts/render-media.mjs     renders docs/media from the drawing code
 ├── LICENSE
 └── README.md
 ```

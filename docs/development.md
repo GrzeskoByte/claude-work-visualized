@@ -55,5 +55,17 @@ with results wrapped as `{ value }` (for example `on('fs.list', () => ({ value: 
 | Shell command reading | `classifyBash()` in `hooks/model.ts` |
 | Pane layout | the `ui.render` hook in `hooks/register.tsx` |
 
-Keep every glyph a single cell. Emoji and characters that need a variation selector are drawn two
-cells wide by some terminals, which misaligns the tree; a test samples rows to catch this.
+Keep every glyph a single cell, and pick glyphs that common monospace fonts (JetBrains Mono, Fira
+Code, Cascadia, DejaVu Sans Mono) include. Emoji, characters that need a variation selector, and
+glyphs a font lacks are drawn from a fallback font, often two cells wide, which misaligns the tree.
+A test samples rows to catch emoji; check font coverage with `fc-query` when adding a glyph.
+
+## Screenshots and GIF
+
+`docs/media/` is rendered from the plugin's own drawing code by `scripts/render-media.mjs`: it
+plays a scripted session through `hooks/model.ts`, paints each frame in headless Chromium, and
+packs the frames into a GIF with ffmpeg. Re-run it after changing how the pane looks:
+
+```sh
+node scripts/render-media.mjs   # Node 23.6+, Playwright with Chromium, ffmpeg
+```

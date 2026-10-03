@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { buildRows, classifyBash, diffTrees, focusOf, relPath, summaryLines, T } from './model'
+import { buildRows, classifyBash, diffTrees, emptyTurn, focusOf, relPath, statusLine, summaryLines, T } from './model'
 import type { FolderMemory } from './model'
 
 const ROOT = '/proj'
@@ -101,9 +101,16 @@ test('every glyph in a row is one cell, so columns line up at any frame', async 
   for (const op of ['view', 'edit', 'create', 'delete'] as const) {
     for (let now = 0; now < 3000; now += 37) {
       const rows = buildRows({ tree, activity: { 'src/a.ts': { op, startedAt: 0, running: 1 } }, ghosts: {}, now, columns: 40, folders: new Map() })
-      for (const r of rows) for (const s of r.segs) expect(/\p{Extended_Pictographic}/u.test(s.t) && s.t !== '✓' && s.t !== '✎' && s.t !== '✗').toBe(false)
+      for (const r of rows) for (const s of r.segs) expect(/\p{Extended_Pictographic}/u.test(s.t) && s.t !== '✓' && s.t !== '✗').toBe(false)
       expect(text(rows[1]?.segs ?? []).length).toBeLessThanOrEqual(40)
     }
+  }
+})
+
+test('the prompt line never runs past the pane, however long the path', async () => {
+  const activity = { 'src/components/some/deeply/nested/UserProfileSettings.tsx': { op: 'create' as const, startedAt: 0, running: 1 } }
+  for (const columns of [24, 40, 46, 80]) {
+    expect(text(statusLine(activity, emptyTurn(), 1234, 10, columns)).length).toBeLessThanOrEqual(columns)
   }
 })
 

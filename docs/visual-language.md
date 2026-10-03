@@ -9,7 +9,7 @@ redraws at about 30 fps while anything moves.
 | Op | Glyph | Colour | Bright | Row tint |
 | --- | --- | --- | --- | --- |
 | read | `◉` | `#58a6ff` | `#cfe6ff` | `#0c2d4f` |
-| edit | `✎` | `#f0883e` | `#ffe2c4` | `#3d2410` |
+| edit | `±` | `#f0883e` | `#ffe2c4` | `#3d2410` |
 | create | `+` | `#3fb950` | `#d2f8dc` | `#0f3a1e` |
 | delete | `✗` | `#f85149` | `#ffd7d5` | `#4a1316` |
 
@@ -75,7 +75,7 @@ A deleted folder shows as a single fading row instead of one row per file inside
 
 ## Chrome
 
-- **Header:** `✻ work-map ~/project`. The spark turns through `· ✢ ✳ ✶ ✻ ✽` while Claude works.
+- **Header:** `✶ work-map ~/project`. The spark turns through `· ∙ • ◆ ✶` while Claude works.
 - **Prompt line:**
   - working: `❯ editing src/app.ts 2.4s █`. The verb shimmers, the folder is muted, and the timer
     counts up.

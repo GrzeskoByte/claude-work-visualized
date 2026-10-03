@@ -26,7 +26,7 @@ export const TINT: Record<Op, string> = {
   delete: '#4a1316',
 }
 // One terminal cell each, so the tree's columns never drift.
-export const ICON: Record<Op, string> = { view: '◉', edit: '✎', create: '+', delete: '✗' }
+export const ICON: Record<Op, string> = { view: '◉', edit: '±', create: '+', delete: '✗' }
 export const LABEL: Record<Op, string> = {
   view: 'read',
   edit: 'edit',
@@ -606,11 +606,12 @@ export function scrollTo(current: number, rows: readonly Row[], focus: string | 
 
 // ---------------------------------------------------------------- chrome
 
-const SPARK = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢']
+// Glyphs every common monospace font has, so the spark never falls back to a wider font.
+const SPARK = ['·', '∙', '•', '◆', '✶', '◆', '•', '∙']
 
-/** `✻ work-map ~/project`, the spark turning while Claude works. */
+/** `✶ work-map ~/project`, the spark turning while Claude works. */
 export function headerLine(now: number, isWorking: boolean, root: string): Seg[] {
-  const spark = isWorking ? SPARK[Math.floor(now / 110) % SPARK.length] ?? '✻' : '✻'
+  const spark = isWorking ? SPARK[Math.floor(now / 110) % SPARK.length] ?? '✶' : '✶'
   return [
     { t: spark, c: isWorking ? mix(CLAUDE, '#ffd2bf', pulse(now, 900) * 0.6) : CLAUDE, b: true },
     { t: ' work-map', c: BASE, b: true },
@@ -631,7 +632,7 @@ export function statusLine(activity: Readonly<Record<string, Activity>>, turn: T
     const secs = `${(Math.max(0, now - a.startedAt) / 1000).toFixed(1)}s`
     const dir = parentOf(focus)
     const tail = ` ${secs}${others > 0 ? ` +${others}` : ''}`
-    const room = columns - 2 - VERB[a.op].length - 1 - tail.length - 1
+    const room = columns - 2 - VERB[a.op].length - 1 - tail.length - 2 // '❯ ', the verb, a space, the tail, ' █'
     const path = truncate(focus, room)
     const cut = dir !== '' && path === focus ? dir.length + 1 : 0
     return [
