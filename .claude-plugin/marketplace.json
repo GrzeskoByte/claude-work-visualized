@@ -1,0 +1,18 @@
+{
+  "name": "claude-work-visualized",
+  "owner": { "name": "Grzegorz Sierocki" },
+  "metadata": {
+    "description": "Claude Work Visualized: a live, animated terminal map of where Claude reads, edits, creates and deletes files"
+  },
+  "plugins": [
+    {
+      "name": "work-visualized",
+      "source": "./",
+      "description": "A live, animated map of the project showing where Claude reads, edits, creates and deletes files",
+      "version": "0.1.0",
+      "author": { "name": "Grzegorz Sierocki" },
+      "license": "MIT",
+      "keywords": ["visualization", "file-tree", "activity", "animation", "pane"]
+    }
+  ]
+}

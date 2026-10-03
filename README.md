@@ -61,21 +61,85 @@ See [docs/visual-language.md](docs/visual-language.md) for the full timelines an
 
 ## Installation
 
-This folder is a complete Claude Code plugin. To load it in any session:
+### Requirements
+
+- [Claude Code](https://claude.com/claude-code) with function-hooks plugins, tested on **2.1.288**. The
+  function-hooks API is in early access and may change between releases.
+- A terminal at least **144 columns wide** for the pane to open on its own as a sidebar. It opens
+  at any width with `/watch`.
+- A dark terminal theme is recommended; the colours are tuned for one.
+
+### Option 1: install from the marketplace (recommended)
+
+This repository is also a Claude Code plugin marketplace. Inside Claude Code, run:
+
+```
+/plugin marketplace add GrzeskoByte/claude-work-visualized
+/plugin install work-visualized@claude-work-visualized
+```
+
+Or from your shell:
 
 ```sh
-git clone git@github.com:GrzeskoByte/claude-work-visualized.git
+claude plugin marketplace add GrzeskoByte/claude-work-visualized
+claude plugin install work-visualized@claude-work-visualized
+```
+
+Restart Claude Code (or start a new session) and the work map loads. Run `/watch` if the pane
+doesn't open by itself.
+
+To update to the latest version:
+
+```sh
+claude plugin marketplace update claude-work-visualized
+claude plugin update work-visualized@claude-work-visualized
+```
+
+To remove it:
+
+```sh
+claude plugin uninstall work-visualized@claude-work-visualized
+claude plugin marketplace remove claude-work-visualized
+```
+
+### Option 2: run from a local clone
+
+Useful for trying it once or for working on the mod itself:
+
+```sh
+git clone https://github.com/GrzeskoByte/claude-work-visualized.git
 claude --plugin-dir ./claude-work-visualized
 ```
 
-You can also add the folder to `CLAUDE_CODE_PLUGIN_DIRS`, either in your environment or in the
-`env` block of `~/.claude/settings.json`.
+`--plugin-dir` loads the plugin for that session only, and reloads it whenever you save a file. To
+load it in every session without installing it, add the folder's absolute path to
+`CLAUDE_CODE_PLUGIN_DIRS`, either in your environment or in the `env` block of
+`~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_PLUGIN_DIRS": "/home/you/claude-work-visualized"
+  }
+}
+```
+
+### Check that it works
+
+1. Start Claude Code in any project and run `/watch`. The pane should show
+   `✻ work-map ~/<your project>` and the project tree.
+2. Ask Claude to read or edit a file. That file should light up as Claude works on it.
+
+If nothing appears, start Claude Code with `claude --debug`. The debug log names the plugin and the
+reason whenever a hook fails or the module doesn't load.
 
 ## Project layout
 
 ```
-work-visualized/
-├── .claude-plugin/plugin.json   manifest
+claude-work-visualized/
+├── .claude-plugin/
+│   ├── plugin.json              plugin manifest
+│   └── marketplace.json         lets the repo be added as a marketplace
 ├── hooks/
 │   ├── hooks.json               names the hooks module
 │   ├── register.tsx             hooks: tool calls, scanning, /watch, timers, the pane
@@ -83,6 +147,7 @@ work-visualized/
 │   └── work.test.tsx            tests
 ├── types/index.d.ts             types for the data the mod keeps in session state
 ├── docs/                        documentation
+├── LICENSE
 └── README.md
 ```
 
