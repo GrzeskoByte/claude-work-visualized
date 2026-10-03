@@ -102,3 +102,7 @@ work-visualized/
   are left out of the tree.
 - **Size limit:** a scan covers at most 2,000 entries, 12 levels deep.
 - **Colours:** tuned for dark terminal themes.
+
+## License
+
+[MIT](LICENSE) © 2026 Grzegorz Sierocki
