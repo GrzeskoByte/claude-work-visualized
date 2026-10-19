@@ -416,7 +416,7 @@ export const register: Register = on => {
     if (thinkBrowse !== undefined && think.below === 0) thinkBrowse = undefined
     else if (thinkBrowse !== undefined) thinkBrowse = { ...thinkBrowse, top: think.top }
     thinkRows = thinking.length > 0 ? { from: 2, to: 3 + thinking.length } : undefined
-    const thinkLabel = `thinking${think.above > 0 ? ` ↑${think.above}` : ''}${think.below > 0 ? ` ↓${think.below}` : ''}`
+    const thinkLabel = `thinking${think.waited !== undefined ? ` ${think.waited}s` : ''}${think.above > 0 ? ` ↑${think.above}` : ''}${think.below > 0 ? ` ↓${think.below}` : ''}`
     const summary = summaryLines(info, now, columns - 4)
     const legend = legendLines(columns)
     const chrome = 3 + 1 + legend.length + 1 + (summary.length > 0 ? summary.length + 2 : 0) + (thinking.length > 0 ? thinking.length + 1 : 0)
