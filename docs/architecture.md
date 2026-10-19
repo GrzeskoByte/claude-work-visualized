@@ -76,7 +76,9 @@ chunk of any other kind (text, a tool call, the stop) marks the thought ended. N
 while watching is off.
 
 The pane does the typing: each frame, `typeTo()` moves the typewriter on from where the last frame
-left it, and `thoughtLines()` word-wraps what's typed so far and keeps the last lines.
+left it, and `thoughtView()` word-wraps what's typed so far and shows the last `thoughtRows()` lines.
+A `ui.scroll` hook takes a wheel over the section and moves the first line shown, until a new
+thought, 20 s without scrolling, or a scroll back to the end. Other scrolls go on to the engine.
 
 ## Scanning and diffing
 
