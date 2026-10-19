@@ -22,7 +22,8 @@ deletes it, so you can see at a glance where Claude is working right now.
 - **Prompt line:** shows what Claude is doing, on which path, for how long, with a blinking
   cursor.
 - **Live thinking:** Claude's thinking types itself out under the prompt line as it streams, the
-  last three lines with a blinking cursor, and fades away a few seconds after the thought ends.
+  last three lines with a blinking cursor, and fades away a few seconds after the thought ends. Needs `"showThinkingSummaries": true` in
+  `~/.claude/settings.json`: without it Claude Code receives thinking with no text.
 - **Completion card:** when a turn ends, a card shows how many files were viewed, edited, created
   and deleted, as filling bars.
 - **Terminal style:** only one-cell glyphs and box-drawing characters, up to 30 fps while anything
