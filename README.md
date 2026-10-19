@@ -21,6 +21,8 @@ deletes it, so you can see at a glance where Claude is working right now.
 - **Fading trail:** files Claude has touched stay marked and fade back to normal over about 60 s.
 - **Prompt line:** shows what Claude is doing, on which path, for how long, with a blinking
   cursor.
+- **Live thinking:** Claude's thinking types itself out under the prompt line as it streams, the
+  last three lines with a blinking cursor, and fades away a few seconds after the thought ends.
 - **Completion card:** when a turn ends, a card shows how many files were viewed, edited, created
   and deleted, as filling bars.
 - **Terminal style:** only one-cell glyphs and box-drawing characters, up to 30 fps while anything

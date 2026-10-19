@@ -1,11 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Activity, Ghost, Op, TreeEntry, TurnInfo } from '../types'
+import type { Activity, Ghost, Op, Thought, TreeEntry, TurnInfo } from '../types'
 import {
-  COLOR, FAINT, ICON, IGNORED, LABEL, MUTED, T,
+  CLAUDE, COLOR, FAINT, ICON, IGNORED, LABEL, MUTED, T,
   buildRows, classifyBash, counted, diffTrees, emptyTurn, focusOf, headerLine, isAnimating, legendLines, mix,
-  relPath, scrollTo, staleKeys, statusLine, summaryLines, withPath, withoutPath,
+  relPath, scrollTo, staleKeys, statusLine, summaryLines, thoughtFade, thoughtLines, typeTo, withPath, withThought,
+  withoutPath,
 } from './model'
 import type { FolderMemory, Seg, Target } from './model'
 
@@ -21,10 +22,12 @@ const activity = atom({ plugin: 'work-visualized', key: 'activity' } as const, {
 const ghosts = atom({ plugin: 'work-visualized', key: 'ghosts' } as const, {} as Record<string, Ghost>)
 const turn = atom({ plugin: 'work-visualized', key: 'turn' } as const, emptyTurn())
 const watching = atom({ plugin: 'work-visualized', key: 'watching' } as const, true)
+const thought = atom({ plugin: 'work-visualized', key: 'thought' } as const, null as Thought | null)
 
 // Drawing memory only: a reload starts these over, harmlessly.
 const folders: FolderMemory = new Map()
 let scroll = 0
+let typed = { key: '', n: 0, at: 0 } // how far the typewriter has got through the thought
 let animateUntil = 0
 let isWatching = true // mirrors the watching atom for synchronous checks
 let scanning: Promise<unknown> = Promise.resolve()
@@ -190,7 +193,7 @@ export const register: Register = on => {
             return out
           })
         }
-        if (!isAnimating(a, g, await read($, turn), t) && t > animateUntil - T.trail) animateUntil = Math.min(animateUntil, t + 1500)
+        if (!isAnimating(a, g, await read($, turn), t, await read($, thought)) && t > animateUntil - T.trail) animateUntil = Math.min(animateUntil, t + 1500)
       })()
     })
 
@@ -252,6 +255,37 @@ export const register: Register = on => {
       setStatus($, undefined)
     }
     return next(e)
+  })
+
+  // Thinking streams in pieces; the pane types each thought out as it arrives.
+  on('turn.step', async function* ($, e, next) {
+    if (e.agentId !== undefined || !isWatching) return yield* next(e)
+    const stream = next(e)
+    let open: string | undefined
+    const close = async () => {
+      if (open === undefined) return
+      open = undefined
+      const now = await $.clock.now()
+      await update($, thought, t => (t === null || t.endedAt !== undefined ? t : { ...t, endedAt: now }))
+    }
+    try {
+      for (let step = await stream.next(); ; step = await stream.next()) {
+        if (step.done === true) return step.value
+        const chunk = step.value
+        if (chunk.kind === 'thinking') {
+          const key = `${e.turnId}:${e.index}:${chunk.index}`
+          open = key
+          const now = await $.clock.now()
+          await update($, thought, t => withThought(t, key, chunk.text, now))
+          startAnimating(now)
+        } else if (chunk.kind !== 'engine') {
+          await close()
+        }
+        yield chunk
+      }
+    } finally {
+      await close()
+    }
   })
 
   on('tool.call', async ($, e, next) => {
@@ -322,6 +356,7 @@ export const register: Register = on => {
     const act = await read($, activity)
     const gh = await read($, ghosts)
     const info = await read($, turn)
+    const th = await read($, thought)
     const root = (await $.session.cwd()).replace(/\/+$/, '').split('/').pop() ?? ''
     const columns = Math.max(24, (e.props.bodyColumns ?? 40) - 1)
     const height = Math.max(8, e.props.scroll?.bodyRows ?? (e.viewport?.rows ?? 30) - 3)
@@ -340,9 +375,14 @@ export const register: Register = on => {
       line([{ t: '── ', c: FAINT }, { t: label, c, b: true }, { t: ' ' + '─'.repeat(Math.max(0, columns - label.length - 4)), c: FAINT }], key)
 
     const rows = buildRows({ tree: entries, activity: act, ghosts: gh, now, columns, folders })
+    if (th !== null) {
+      if (th.key !== typed.key) typed = { key: th.key, n: th.dropped, at: now }
+      typed = { key: th.key, n: typeTo(typed.n, th.dropped + th.text.length, Math.min(250, now - typed.at)), at: now }
+    }
+    const thinking = thoughtLines(th, typed.n, now, columns)
     const summary = summaryLines(info, now, columns - 4)
     const legend = legendLines(columns)
-    const chrome = 3 + 1 + legend.length + 1 + (summary.length > 0 ? summary.length + 2 : 0)
+    const chrome = 3 + 1 + legend.length + 1 + (summary.length > 0 ? summary.length + 2 : 0) + (thinking.length > 0 ? thinking.length + 1 : 0)
     const room = Math.max(3, height - chrome)
     const focus = focusOf(act)
     scroll = scrollTo(scroll, rows, focus, room)
@@ -357,6 +397,8 @@ export const register: Register = on => {
       <Box flexDirection="column" width={columns}>
         {line(headerLine(now, focus !== undefined || info.phase === 'working', root), 'h')}
         {line(statusLine(act, info, now, fileCount, columns), 's')}
+        {thinking.length > 0 && rule('thinking', 'r0', mix(CLAUDE, FAINT, thoughtFade(th, typed.n, now)))}
+        {thinking.map((segs, i) => line(segs, `th${i}`))}
         {rule(above > 0 ? `tree ↑${above}` : 'tree', 'r1')}
         {rows.length === 0 ? line([{ t: ' scanning…', c: MUTED }], 'empty') : visible.map(r => line(r.segs, r.key))}
         {below > 0 && line([{ t: `   ↓ ${below} more`, c: FAINT }], 'down')}
