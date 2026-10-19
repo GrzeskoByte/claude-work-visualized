@@ -623,8 +623,15 @@ export function headerLine(now: number, isWorking: boolean, root: string): Seg[]
   ]
 }
 
-/** The prompt line: what Claude is doing right now, with a live cursor. */
-export function statusLine(activity: Readonly<Record<string, Activity>>, turn: TurnInfo, now: number, fileCount: number, columns: number): Seg[] {
+/** The prompt line: what Claude is doing right now, with a live cursor; `waited` counts a thought's wait. */
+export function statusLine(
+  activity: Readonly<Record<string, Activity>>,
+  turn: TurnInfo,
+  now: number,
+  fileCount: number,
+  columns: number,
+  waited?: number,
+): Seg[] {
   const focus = focusOf(activity)
   const a = focus === undefined ? undefined : activity[focus]
   const cursor = (c: string): Seg => ({ t: '█', c: mix(c, FAINT, pulse(now, 1060)) })
@@ -650,7 +657,10 @@ export function statusLine(activity: Readonly<Record<string, Activity>>, turn: T
       cursor(col),
     ]
   }
-  if (turn.phase === 'working') return [{ t: '❯ ', c: CLAUDE, b: true }, ...shimmer('thinking', MUTED), { t: ' ' }, cursor(MUTED)]
+  if (turn.phase === 'working') {
+    const secs: Seg[] = waited === undefined ? [] : [{ t: ` ${waited}s`, c: MUTED }]
+    return [{ t: '❯ ', c: CLAUDE, b: true }, ...shimmer('thinking', MUTED), ...secs, { t: ' ' }, cursor(MUTED)]
+  }
   return [{ t: '❯ ', c: MUTED }, { t: `idle · ${fileCount} files`, c: MUTED }, { t: ' ' }, cursor(MUTED)]
 }
 
