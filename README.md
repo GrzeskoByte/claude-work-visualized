@@ -25,6 +25,10 @@ deletes it, so you can see at a glance where Claude is working right now.
   read (a wave of dots and a seconds count hold its place until the words arrive), with a blinking cursor, in up to 12 lines. Scroll over it to read back. It stays until 20 s
   after the turn ends. Needs `"showThinkingSummaries": true` in
   `~/.claude/settings.json`: without it Claude Code receives thinking with no text.
+- **Git graph:** when Claude runs `git` or `gh`, a small branch graph appears under the prompt
+  line: checkouts move the `◉` HEAD marker, new commits pop in, merges light up the joining lines,
+  pushes and pulls count commits ahead and behind, and `gh pr create` / `gh pr merge` open a PR
+  card. It stays for a minute after the last git command.
 - **Completion card:** when a turn ends, a card shows how many files were viewed, edited, created
   and deleted, as filling bars.
 - **Terminal style:** only one-cell glyphs and box-drawing characters, up to 30 fps while anything

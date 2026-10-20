@@ -40,6 +40,8 @@ the reason.
 - thinking: collapsing whitespace, the typewriter's pace, wrapping, the cursor and the fade, and a
   streamed `turn.step` typing itself into the pane while its chunks and result pass through, and
   the wheel scrolling back through it
+- git: reading git and gh commands, parsing `git log --graph`, the HEAD label, new commits, the
+  PR card and the fade, and a commit run through `tool.call` showing in the pane
 - end to end: a `Read` running against mocked `fs.list` and `session.cwd` appears in the pane on
   both the terminal and the desktop, and `/watch` switches off and on
 
@@ -58,6 +60,7 @@ with results wrapped as `{ value }` (for example `on('fs.list', () => ({ value: 
 | Which tools count as which operation | `targetsOf()` in `hooks/register.tsx` |
 | Shell command reading | `classifyBash()` in `hooks/model.ts` |
 | Pane layout | the `ui.render` hook in `hooks/register.tsx` |
+| Git actions, glyphs, colours, timings | `gitActionsOf()`, `KIND_*` and the constants in `hooks/git.ts` |
 
 Keep every glyph a single cell, and pick glyphs that common monospace fonts (JetBrains Mono, Fira
 Code, Cascadia, DejaVu Sans Mono) include. Emoji, characters that need a variation selector, and
