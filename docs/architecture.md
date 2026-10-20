@@ -130,6 +130,9 @@ every frame:
 4. `merge()` joins neighbouring cells that share a style, so a row painted cell by cell still
    becomes only a few `Text` elements.
 
+From 84 columns thinking and the git graph sit beside the tree, stacked in that order; narrower,
+they go above the tree.
+
 ### The frame clock
 
 `$.clock.every(33)` calls `$.ui.invalidate('ui.render')`, about 30 fps, which is the most the

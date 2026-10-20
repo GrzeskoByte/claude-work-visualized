@@ -21,7 +21,7 @@ const MAX_ENTRIES = 2000
 const MAX_DEPTH = 12
 const FRAME_MS = 33 // ~30 fps while anything moves, the terminal's cap for a shown pane
 const POLL_MS = 1500 // how often the project is rescanned for changes made outside tool calls
-const SPLIT_COLUMNS = 96 // from this wide thinking and git sit beside the tree, else above it
+const SPLIT_COLUMNS = 84 // from this wide thinking and git sit beside the tree, else above it
 const WHEEL_LINES = 2 // lines one wheel or touchpad tick moves the thought
 const BROWSE_HOLD = 20_000 // a scrolled thought stays put this long without scrolling
 
