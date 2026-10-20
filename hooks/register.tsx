@@ -493,7 +493,7 @@ export const register: Register = on => {
     }
     if (thinkBrowse !== undefined && (th === null || turnOf(thinkBrowse.key) !== turnOf(th.key) || now - thinkBrowse.at > BROWSE_HOLD)) thinkBrowse = undefined
     // The prompt line already says thinking while Claude thinks: the section then needs no title.
-    const saysThinking = heldFocusOf(act, now) === undefined && gitDoingOf(gs) === undefined && writing === undefined && info.phase === 'working'
+    const saysThinking = heldFocusOf(act, now) === undefined && gitDoingOf(gs, now) === undefined && writing === undefined && info.phase === 'working'
 
     /** The thinking section at `at` in the pane: its rule, plain while the prompt line says thinking, and its lines. */
     function thinkingSection(columns: number, rows: number, at: { column: number; row: number }) {
@@ -560,7 +560,7 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" width={columns} flexGrow={1}>
           {line(headerLine(now, focus !== undefined || info.phase === 'working', root), 'h')}
-          {line(statusLine(act, info, now, fileCount, columns, { waited, git: gitDoingOf(gs), writing }), 's')}
+          {line(statusLine(act, info, now, fileCount, columns, { waited, git: gitDoingOf(gs, now), writing }), 's')}
           {over.els}
           {rule(above > 0 ? `tree ↑${above}` : 'tree', 'r1', columns)}
           {rows.length === 0 ? line([{ t: ' scanning…', c: MUTED }], 'empty') : visible.map(r => line(r.segs, r.key))}

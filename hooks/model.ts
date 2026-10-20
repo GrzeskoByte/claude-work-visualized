@@ -666,7 +666,7 @@ export function statusLine(
   columns: number,
   extra: {
     waited?: number
-    git?: { verb: string; text: string; color: string; at: number }
+    git?: { verb: string; text: string; color: string; at: number; endedAt?: number }
     /** A tool call the model is still writing, and how much of its input has come. */
     writing?: { tool: string; bytes: number; at: number }
   } = {},
@@ -679,8 +679,9 @@ export function statusLine(
   const shimmer = (text: string, c: string): Seg[] =>
     paint(text, i => ({ c: mix(c, '#ffffff', 0.7 * band(i, ((now / 70) % (text.length + 10)) - 5, 2.5)), b: true }))
   // A git command names what it does to the repository, not the files it touches.
-  if (git !== undefined) {
-    const tail = ` ${(Math.max(0, now - git.at) / 1000).toFixed(1)}s`
+  // A finished git command holds the line only until another call starts.
+  if (git !== undefined && (git.endedAt === undefined || (focusOf(activity) === undefined && writing === undefined))) {
+    const tail = ` ${(Math.max(0, (git.endedAt ?? now) - git.at) / 1000).toFixed(1)}s`
     const room = columns - 2 - git.verb.length - 1 - tail.length - 2
     return [
       { t: '❯ ', c: CLAUDE, b: true },
