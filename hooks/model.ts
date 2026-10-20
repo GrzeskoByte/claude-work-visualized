@@ -272,6 +272,23 @@ export function focusOf(activity: Readonly<Record<string, Activity>>): string | 
   return best
 }
 
+export const HOLD_LINE = 2500 // a finished operation keeps the prompt line this long, so it doesn't flash "thinking" between calls
+
+/** The file the prompt line names: the running operation, or one that ended a moment ago. */
+export function heldFocusOf(activity: Readonly<Record<string, Activity>>, now: number): string | undefined {
+  const running = focusOf(activity)
+  if (running !== undefined) return running
+  let best: string | undefined
+  let at = now - HOLD_LINE
+  for (const [path, a] of Object.entries(activity)) {
+    if (a.endedAt !== undefined && a.endedAt >= at) {
+      best = path
+      at = a.endedAt
+    }
+  }
+  return best
+}
+
 export function isAnimating(
   activity: Readonly<Record<string, Activity>>,
   ghosts: Readonly<Record<string, Ghost>>,
@@ -623,6 +640,23 @@ export function headerLine(now: number, isWorking: boolean, root: string): Seg[]
   ]
 }
 
+/** A tool name as the prompt line shows it: `mcp__claude_ai_Obsidian__edit-note` is `Obsidian edit-note`. */
+export function toolName(tool: string): string {
+  return tool.replace(/^mcp__/, '').replace(/^claude_ai_/, '').replace(/__/g, ' ')
+}
+
+const SIZE_UNITS = ['B', 'kB', 'MB', 'GB', 'TB']
+
+function sizeText(bytes: number): string {
+  let n = bytes
+  let unit = 0
+  while (n >= 1000 && unit < SIZE_UNITS.length - 1) {
+    n /= 1000
+    unit++
+  }
+  return `${unit > 0 && n < 10 ? n.toFixed(1) : Math.round(n)} ${SIZE_UNITS[unit]}`
+}
+
 /** The prompt line: what Claude is doing right now, with a live cursor; `waited` counts a thought's wait. */
 export function statusLine(
   activity: Readonly<Record<string, Activity>>,
@@ -630,9 +664,15 @@ export function statusLine(
   now: number,
   fileCount: number,
   columns: number,
-  waited?: number,
+  extra: {
+    waited?: number
+    /** A tool call the model is still writing, and how much of its input has come. */
+    writing?: { tool: string; bytes: number; at: number }
+  } = {},
 ): Seg[] {
-  const focus = focusOf(activity)
+  const { waited, writing } = extra
+  // A running call wins; a finished one holds the line only until something else starts.
+  const focus = focusOf(activity) ?? (writing === undefined ? heldFocusOf(activity, now) : undefined)
   const a = focus === undefined ? undefined : activity[focus]
   const cursor = (c: string): Seg => ({ t: '█', c: mix(c, FAINT, pulse(now, 1060)) })
   const shimmer = (text: string, c: string): Seg[] =>
@@ -640,7 +680,7 @@ export function statusLine(
   if (a !== undefined && focus !== undefined) {
     const col = COLOR[a.op]
     const others = Object.values(activity).filter(x => x.running > 0).length - 1
-    const secs = `${(Math.max(0, now - a.startedAt) / 1000).toFixed(1)}s`
+    const secs = `${(Math.max(0, (a.running > 0 || a.endedAt === undefined ? now : a.endedAt) - a.startedAt) / 1000).toFixed(1)}s`
     const dir = parentOf(focus)
     const tail = ` ${secs}${others > 0 ? ` +${others}` : ''}`
     const room = columns - 2 - VERB[a.op].length - 1 - tail.length - 2 // '❯ ', the verb, a space, the tail, ' █'
@@ -655,6 +695,20 @@ export function statusLine(
       { t: tail, c: MUTED },
       { t: ' ' },
       cursor(col),
+    ]
+  }
+  // A long tool call (a big Write, a whole note) takes a while to write before it runs.
+  if (writing !== undefined) {
+    const tail = ` ${sizeText(writing.bytes)} ${(Math.max(0, now - writing.at) / 1000).toFixed(1)}s`
+    const room = columns - 2 - 'writing'.length - 1 - tail.length - 2
+    return [
+      { t: '❯ ', c: CLAUDE, b: true },
+      ...shimmer('writing', CLAUDE),
+      { t: ' ' },
+      { t: truncate(toolName(writing.tool), room), c: BASE },
+      { t: tail, c: MUTED },
+      { t: ' ' },
+      cursor(CLAUDE),
     ]
   }
   if (turn.phase === 'working') {

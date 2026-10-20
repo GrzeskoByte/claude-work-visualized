@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Activity, Ghost, Op, Thought, TreeEntry, TurnInfo } from '../types'
 import {
   CLAUDE, COLOR, FAINT, ICON, IGNORED, LABEL, MUTED, T,
-  buildRows, classifyBash, counted, diffTrees, emptyTurn, focusOf, headerLine, isAnimating, legendLines, mix,
+  buildRows, classifyBash, counted, diffTrees, emptyTurn, focusOf, headerLine, heldFocusOf, isAnimating, legendLines, mix,
   relPath, scrollTo, staleKeys, statusLine, summaryLines, thoughtRows, thoughtView, typeTo, withPath, withThought,
   withoutPath,
 } from './model'
@@ -33,6 +33,7 @@ let typed = { key: '', n: 0, at: 0 } // how far the typewriter has got through t
 let thinkBrowse: { key: string; top: number; at: number } | undefined // the person scrolling back through the thought
 let thinkRows: { from: number; to: number } | undefined // pane rows the thinking section was drawn on last frame
 let thinkTop = 0 // the thought's first line shown last frame
+let writing: { tool: string; bytes: number; at: number } | undefined // a tool call the model is still writing
 let animateUntil = 0
 let isWatching = true // mirrors the watching atom for synchronous checks
 let scanning: Promise<unknown> = Promise.resolve()
@@ -286,6 +287,14 @@ export const register: Register = on => {
       for (let step = await stream.next(); ; step = await stream.next()) {
         if (step.done === true) return step.value
         const chunk = step.value
+        if (chunk.kind === 'tool') {
+          writing = { tool: chunk.name, bytes: 0, at: await $.clock.now() }
+          startAnimating(writing.at)
+        } else if (chunk.kind === 'input' && writing !== undefined) {
+          writing = { ...writing, bytes: writing.bytes + chunk.json.length }
+        } else if (chunk.kind === 'stop') {
+          writing = undefined
+        }
         if (chunk.kind === 'thinking' && !isSettled) {
           const key = `${e.turnId}:${e.index}:${chunk.index}`
           isOpen = true
@@ -301,11 +310,13 @@ export const register: Register = on => {
         yield chunk
       }
     } finally {
+      writing = undefined
       await settle()
     }
   })
 
   on('tool.call', async ($, e, next) => {
+    writing = undefined
     const tool = String(e.tool)
     const mutates = tool === 'Bash' || tool === 'Write' || tool === 'Edit' || tool === 'MultiEdit' || tool === 'NotebookEdit'
     const cwd = await $.session.cwd()
@@ -398,9 +409,14 @@ export const register: Register = on => {
         ))}
       </Box>
     )
-    // `── label ─────`, a section rule.
+    // `── label ─────`, a section rule; a plain rule when the label is empty.
     const rule = (label: string, key: string, c = FAINT) =>
-      line([{ t: '── ', c: FAINT }, { t: label, c, b: true }, { t: ' ' + '─'.repeat(Math.max(0, columns - label.length - 4)), c: FAINT }], key)
+      line(
+        label === ''
+          ? [{ t: '─'.repeat(columns), c: FAINT }]
+          : [{ t: '── ', c: FAINT }, { t: label, c, b: true }, { t: ' ' + '─'.repeat(Math.max(0, columns - label.length - 4)), c: FAINT }],
+        key,
+      )
 
     const rows = buildRows({ tree: entries, activity: act, ghosts: gh, now, columns, folders })
     if (th !== null) {
@@ -416,10 +432,10 @@ export const register: Register = on => {
     if (thinkBrowse !== undefined && think.below === 0) thinkBrowse = undefined
     else if (thinkBrowse !== undefined) thinkBrowse = { ...thinkBrowse, top: think.top }
     // The prompt line already says thinking while Claude thinks: the section then needs no title.
-    const saysThinking = focusOf(act) === undefined && info.phase === 'working'
+    const saysThinking = heldFocusOf(act, now) === undefined && writing === undefined && info.phase === 'working'
     const arrows = `${think.above > 0 ? ` ↑${think.above}` : ''}${think.below > 0 ? ` ↓${think.below}` : ''}`.trim()
     const thinkLabel = saysThinking ? arrows : `thinking${think.waited !== undefined ? ` ${think.waited}s` : ''}${arrows === '' ? '' : ` ${arrows}`}`
-    const thinkRule = thinking.length > 0 && thinkLabel !== ''
+    const thinkRule = thinking.length > 0
     const thinkingRows = thinking.length + (thinkRule ? 1 : 0)
     thinkRows = thinkingRows > 0 ? { from: 2, to: 2 + thinkingRows } : undefined
     const summary = summaryLines(info, now, columns - 4)
@@ -438,7 +454,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" width={columns}>
         {line(headerLine(now, focus !== undefined || info.phase === 'working', root), 'h')}
-        {line(statusLine(act, info, now, fileCount, columns, saysThinking ? think.waited : undefined), 's')}
+        {line(statusLine(act, info, now, fileCount, columns, { waited: saysThinking ? think.waited : undefined, writing }), 's')}
         {thinkRule && rule(thinkLabel, 'r0', mix(CLAUDE, FAINT, think.fade))}
         {thinking.map((segs, i) => line(segs, `th${i}`))}
         {rule(above > 0 ? `tree ↑${above}` : 'tree', 'r1')}
