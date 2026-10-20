@@ -5,7 +5,7 @@ import type { Activity, Ghost, Op, Thought, TreeEntry, TurnInfo } from '../types
 import {
   CLAUDE, COLOR, FAINT, ICON, IGNORED, LABEL, MUTED, T,
   buildRows, classifyBash, counted, diffTrees, emptyTurn, focusOf, headerLine, heldFocusOf, isAnimating, legendLines, mix,
-  relPath, scrollTo, staleKeys, statusLine, summaryLines, thoughtRows, thoughtView, typeTo, withPath, withThought,
+  relPath, scrollTo, staleKeys, statusLine, summaryLines, thoughtRows, thoughtView, turnOf, typeTo, withPath, withThought,
   withoutPath,
 } from './model'
 import type { FolderMemory, Seg, Target } from './model'
@@ -382,7 +382,7 @@ export const register: Register = on => {
     const th = await read($, thought)
     const row = e.pointer?.row
     if (th === null || thinkRows === undefined || row === undefined || row < thinkRows.from || row >= thinkRows.to) return next(e)
-    const from = thinkBrowse?.key === th.key ? thinkBrowse.top : thinkTop
+    const from = thinkBrowse !== undefined && turnOf(thinkBrowse.key) === turnOf(th.key) ? thinkBrowse.top : thinkTop
     thinkBrowse = { key: th.key, top: Math.max(0, from + e.by * WHEEL_LINES), at: await $.clock.now() }
     $.ui.invalidate('ui.render')
     return {}
@@ -420,11 +420,12 @@ export const register: Register = on => {
 
     const rows = buildRows({ tree: entries, activity: act, ghosts: gh, now, columns, folders })
     if (th !== null) {
-      if (th.key !== typed.key) typed = { key: th.key, n: th.dropped, at: now }
+      // A new block in the same turn types on from where the last left off; a new turn starts over.
+      if (turnOf(th.key) !== turnOf(typed.key)) typed = { key: th.key, n: th.dropped, at: now }
       const pace = th.endedAt === undefined ? 'reading' : 'late'
       typed = { key: th.key, n: typeTo(typed.n, th.dropped + th.text.length, Math.min(250, now - typed.at), pace), at: now }
     }
-    if (thinkBrowse !== undefined && (th === null || thinkBrowse.key !== th.key || now - thinkBrowse.at > BROWSE_HOLD)) thinkBrowse = undefined
+    if (thinkBrowse !== undefined && (th === null || turnOf(thinkBrowse.key) !== turnOf(th.key) || now - thinkBrowse.at > BROWSE_HOLD)) thinkBrowse = undefined
     const think = thoughtView({ thought: th, typed: typed.n, now, turn: info, columns, rows: thoughtRows(height), top: thinkBrowse?.top })
     const thinking = think.lines
     thinkTop = think.top

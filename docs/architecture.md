@@ -24,7 +24,7 @@ hot reload:
 | `activity` | Per path: `{ op, startedAt, endedAt?, running }`, i.e. the last operation and how many tool calls are still running on it |
 | `ghosts` | Deleted paths kept on screen while their exit animation plays |
 | `turn` | `idle`, `working` or `complete`, plus the paths counted per operation this turn |
-| `thought` | The latest thinking block: its text with whitespace collapsed (the last 4,000 characters), when its last piece arrived, and when it ended |
+| `thought` | The turn's thinking so far, one paragraph per block, whitespace collapsed (the last 24,000 characters), the key of the block streaming now, when its last piece arrived, and when it ended |
 | `watching` | Whether `/watch` is on (also kept in `$.store`, so it lasts across sessions) |
 
 Drawing-only memory (which folders are open, the scroll position, how far the typewriter has got) is kept in module variables.
@@ -71,7 +71,8 @@ never mistaken for a file.
 
 The `turn.step` hook reads the model's response as it streams and passes every chunk on
 unchanged. Each `thinking` chunk of the main loop (not subagents) is appended to `thought` by
-`withThought()`, keyed by turn, step and block, so a new block starts a new thought. The first
+`withThought()`, keyed by turn, step and block: a new block in the same turn is added as a new
+paragraph under the earlier ones, and a new turn starts the thought over. The first
 chunk of any other kind (text, a tool call, the stop) marks the thought ended. Nothing is read
 while watching is off.
 
