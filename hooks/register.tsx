@@ -523,8 +523,9 @@ export const register: Register = on => {
     if (paneColumns >= SPLIT_COLUMNS && (hasThinking || hasGit)) {
       const treeColumns = Math.max(30, Math.min(48, Math.floor(paneColumns * 0.4)))
       const sideColumns = paneColumns - treeColumns - 2
-      const thinking = thinkingSection(sideColumns, Math.max(3, Math.floor(height * 0.45)), { column: treeColumns + 2, row: 0 })
-      const gitPart = gitSection(sideColumns, Math.max(4, Math.floor(height * 0.45)))
+      // Thinking takes the whole column when it is alone, half of it next to git.
+      const thinking = thinkingSection(sideColumns, Math.max(3, (hasGit ? Math.floor(height / 2) : height) - 1), { column: treeColumns + 2, row: 0 })
+      const gitPart = gitSection(sideColumns, Math.max(4, height - 1 - thinking.rows))
       return (
         <Box flexDirection="row" width={paneColumns} flexGrow={1}>
           {mapView(treeColumns, saysThinking ? thinking.waited : undefined)}
