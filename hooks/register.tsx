@@ -6,7 +6,7 @@ import {
   AHEAD_ARGV, gitActionsOf, gitDoingOf, gitEnded, gitFade, gitRead, gitStarted, gitView, graphArgv, mainAction, parseGraph, prBaseOf, prNumberOf, refsAfter,
   repoDir,
 } from './git'
-import type { GitRead } from './git'
+import type { GitRead, PrShown } from './git'
 import {
   CLAUDE, COLOR, FAINT, ICON, IGNORED, LABEL, MUTED, T,
   buildRows, classifyBash, counted, diffTrees, emptyTurn, focusOf, headerLine, heldFocusOf, isAnimating, legendLines, mix,
@@ -43,6 +43,7 @@ let thinkTop = 0 // the thought's first line shown last frame
 let writing: { tool: string; bytes: number; at: number } | undefined // a tool call the model is still writing
 let animateUntil = 0
 let isWatching = true // mirrors the watching atom for synchronous checks
+let prs: PrShown = 'shown'
 let scanning: Promise<unknown> = Promise.resolve()
 
 async function scanTree($: EngineInterface): Promise<TreeEntry[]> {
@@ -175,6 +176,11 @@ export const register: Register = on => {
       name: 'watch',
       description: 'Toggle Claude Work Visualized: the live map of where Claude is working',
     }).catch(() => undefined)
+    await $.command.register({
+      name: 'prs',
+      description: 'Toggle pull requests in the work pane\'s git graph',
+    }).catch(() => undefined)
+    prs = (await $.store.get('prs').catch(() => undefined)) === 'hidden' ? 'hidden' : 'shown'
     const now = await $.clock.now()
     const stored = await $.store.get('watching').catch(() => undefined)
     const isOn = stored !== false
@@ -231,6 +237,13 @@ export const register: Register = on => {
     })
 
     return next(e)
+  })
+
+  on('command.run', { command: 'prs' }, async $ => {
+    prs = prs === 'shown' ? 'hidden' : 'shown'
+    await $.store.set('prs', prs).catch(() => undefined)
+    $.ui.invalidate('ui.render')
+    return { text: prs === 'shown' ? 'Pull requests show in the git graph.' : 'Pull requests are hidden from the git graph. /prs shows them again.' }
   })
 
   on('command.run', { command: 'watch' }, async $ => {
@@ -497,7 +510,7 @@ export const register: Register = on => {
     }
 
     function gitSection(columns: number, rows: number) {
-      const gv = gitView(gs, now, columns, rows, sessionRoot)
+      const gv = gitView(gs, now, columns, rows, sessionRoot, prs)
       const used = gv.lines.length > 0 ? gv.lines.length + 1 : 0
       const els = used === 0 ? [] : [rule(gv.label, 'rg', columns, mix(CLAUDE, FAINT, gv.fade)), ...gv.lines.map((segs, i) => line(segs, `git${i}`))]
       return { els, rows: used }
@@ -505,7 +518,7 @@ export const register: Register = on => {
 
     // From SPLIT_COLUMNS wide, thinking and git go beside the tree.
     const hasThinking = thoughtView({ thought: th, typed: typed.n, now, turn: info, columns: 40, rows: 1 }).lines.length > 0
-    const hasGit = gitView(gs, now, 40, 1, sessionRoot).lines.length > 0
+    const hasGit = gitView(gs, now, 40, 1, sessionRoot, prs).lines.length > 0
     if (paneColumns >= SPLIT_COLUMNS && (hasThinking || hasGit)) {
       const treeColumns = Math.max(30, Math.min(48, Math.floor(paneColumns * 0.4)))
       const sideColumns = paneColumns - treeColumns - 2
