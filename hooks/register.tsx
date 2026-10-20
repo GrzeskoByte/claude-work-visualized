@@ -2,7 +2,10 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { Activity, Ghost, GitAction, GitState, Op, Thought, TreeEntry, TurnInfo } from '../types'
-import { AHEAD_ARGV, gitActionsOf, gitEnded, gitFade, gitStarted, gitView, graphArgv, parseGraph, prBaseOf, prNumberOf, refsAfter } from './git'
+import {
+  AHEAD_ARGV, gitActionsOf, gitDoingOf, gitEnded, gitFade, gitRead, gitStarted, gitView, graphArgv, mainAction, parseGraph, prBaseOf, prNumberOf, refsAfter,
+  repoDir,
+} from './git'
 import type { GitRead } from './git'
 import {
   CLAUDE, COLOR, FAINT, ICON, IGNORED, LABEL, MUTED, T,
@@ -215,7 +218,13 @@ export const register: Register = on => {
       if (polling) return
       polling = true
       void (async () => {
-        if (await read($, watching)) await rescan($, new Set())
+        if (!(await read($, watching))) return
+        await rescan($, new Set())
+        // A long command (a script that commits, a slow push) shows its commits as they land.
+        const gs = await read($, git)
+        if (gs === null || gs.endedAt !== undefined) return
+        const fresh = await readGit($, gs.dir, gs.refs)
+        if (fresh !== undefined) await update($, git, s => (s === null || s.endedAt !== undefined || s.dir !== gs.dir ? s : gitRead(s, fresh)))
       })().finally(() => {
         polling = false
       })
@@ -386,26 +395,31 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const command = String((e as { command?: unknown }).command ?? '')
     const actions = gitActionsOf(command)
-    const action = actions[actions.length - 1]
+    const action = mainAction(actions)
     if (action === undefined || !isWatching) return next(e)
     const cwd = await $.session.cwd()
-    if ((await read($, git)) === null) {
-      const first = await readGit($, cwd, [])
-      if (first !== undefined) await update($, git, () => gitEnded(gitStarted(null, action, 0), first, [], false, 0))
+    // The repository the command ran in; a folder hidden in a variable can't be read.
+    const dir = repoDir(action.dir, cwd, await $.env.get('HOME').catch(() => undefined))
+    if (dir === undefined) return next(e)
+    const known = await read($, git)
+    if (known === null || known.dir !== dir) {
+      const first = await readGit($, dir, [])
+      if (first === undefined) return next(e)
+      await update($, git, () => gitEnded(gitStarted(null, action, 0, dir), first, [], false, 0))
     }
     const startedAt = await $.clock.now()
     const before = await read($, git)
-    await update($, git, s => gitStarted(s, action, startedAt))
+    await update($, git, s => gitStarted(s, action, startedAt, dir))
     startAnimating(startedAt)
 
     const ran = await next(e)
     const isFailed = ran.deny !== undefined || ran.isError === true
     const stdout = String((ran.result as { stdout?: unknown } | undefined)?.stdout ?? '')
     const refs = refsAfter(before?.refs ?? [], action, before?.head ?? '')
-    const fresh = await readGit($, cwd, refs)
+    const fresh = await readGit($, dir, refs)
     const now = await $.clock.now()
     await update($, git, s => {
-      const ended = gitEnded(s ?? gitStarted(null, action, now), fresh, refs, isFailed, now)
+      const ended = gitEnded(s ?? gitStarted(null, action, now, dir), fresh, refs, isFailed, now)
       return isFailed ? ended : withPr(ended, actions, command, stdout, now)
     })
     startAnimating(now)
@@ -434,7 +448,8 @@ export const register: Register = on => {
     const info = await read($, turn)
     const th = await read($, thought)
     const gs = await read($, git)
-    const root = (await $.session.cwd()).replace(/\/+$/, '').split('/').pop() ?? ''
+    const sessionRoot = (await $.session.cwd()).replace(/\/+$/, '')
+    const root = sessionRoot.split('/').pop() ?? ''
     const paneColumns = Math.max(24, (e.props.bodyColumns ?? 40) - 1)
     const height = Math.max(8, e.props.scroll?.bodyRows ?? (e.viewport?.rows ?? 30) - 3)
 
@@ -464,7 +479,7 @@ export const register: Register = on => {
     }
     if (thinkBrowse !== undefined && (th === null || turnOf(thinkBrowse.key) !== turnOf(th.key) || now - thinkBrowse.at > BROWSE_HOLD)) thinkBrowse = undefined
     // The prompt line already says thinking while Claude thinks: the section then needs no title.
-    const saysThinking = heldFocusOf(act, now) === undefined && writing === undefined && info.phase === 'working'
+    const saysThinking = heldFocusOf(act, now) === undefined && gitDoingOf(gs) === undefined && writing === undefined && info.phase === 'working'
 
     /** The thinking section at `at` in the pane: its rule, plain while the prompt line says thinking, and its lines. */
     function thinkingSection(columns: number, rows: number, at: { column: number; row: number }) {
@@ -482,7 +497,7 @@ export const register: Register = on => {
     }
 
     function gitSection(columns: number, rows: number) {
-      const gv = gitView(gs, now, columns, rows)
+      const gv = gitView(gs, now, columns, rows, sessionRoot)
       const used = gv.lines.length > 0 ? gv.lines.length + 1 : 0
       const els = used === 0 ? [] : [rule(gv.label, 'rg', columns, mix(CLAUDE, FAINT, gv.fade)), ...gv.lines.map((segs, i) => line(segs, `git${i}`))]
       return { els, rows: used }
@@ -490,7 +505,7 @@ export const register: Register = on => {
 
     // From SPLIT_COLUMNS wide, thinking and git go beside the tree.
     const hasThinking = thoughtView({ thought: th, typed: typed.n, now, turn: info, columns: 40, rows: 1 }).lines.length > 0
-    const hasGit = gitView(gs, now, 40, 1).lines.length > 0
+    const hasGit = gitView(gs, now, 40, 1, sessionRoot).lines.length > 0
     if (paneColumns >= SPLIT_COLUMNS && (hasThinking || hasGit)) {
       const treeColumns = Math.max(30, Math.min(48, Math.floor(paneColumns * 0.4)))
       const sideColumns = paneColumns - treeColumns - 2
@@ -531,7 +546,7 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" width={columns} flexGrow={1}>
           {line(headerLine(now, focus !== undefined || info.phase === 'working', root), 'h')}
-          {line(statusLine(act, info, now, fileCount, columns, { waited, writing }), 's')}
+          {line(statusLine(act, info, now, fileCount, columns, { waited, git: gitDoingOf(gs), writing }), 's')}
           {over.els}
           {rule(above > 0 ? `tree ↑${above}` : 'tree', 'r1', columns)}
           {rows.length === 0 ? line([{ t: ' scanning…', c: MUTED }], 'empty') : visible.map(r => line(r.segs, r.key))}
