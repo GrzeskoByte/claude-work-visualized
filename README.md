@@ -21,6 +21,10 @@ deletes it, so you can see at a glance where Claude is working right now.
 - **Fading trail:** files Claude has touched stay marked and fade back to normal over about 60 s.
 - **Prompt line:** shows what Claude is doing, on which path, for how long, with a blinking
   cursor.
+- **Remote work:** commands run over `ssh`, and files copied with `scp` or `rsync`, show in the
+  tree under a folder per host (`deploy@web1:/etc/nginx/…`, `~` for the remote home), heredoc
+  scripts and `for` loops included. While Claude works on a host, the header names it:
+  `work-map ~/project → deploy@web1`.
 - **Code view:** each `Edit` and `Write` is replayed as keystrokes next to the tree: replaced
   lines turn red and fold away, new lines type in behind a caret, small changes are selected,
   backspaced and retyped in place, and gutter marks stay for a while after. Long lines wrap, the
@@ -182,7 +186,8 @@ claude-work-visualized/
 - **Shell commands:** files touched by `rm`, `mv`, `cp`, `touch`, `mkdir`, `cat`, `sed -i`, `>`
   and similar are recognised by reading the command text. Anything else is caught by the rescan
   after the command and shown as finished, without a "running" phase.
-- **Changes made outside Claude:** they show up too, animated as if Claude had made them.
+- **Changes made outside Claude:** they show up too, animated as if Claude had made them, but the
+  completion card counts only what Claude's own tool calls changed.
 - **Skipped folders:** `node_modules`, `.git`, `dist`, `build`, caches and virtual environments
   are left out of the tree.
 - **Code view:** only `Edit`, `MultiEdit` and `Write` are replayed; a file changed through a
