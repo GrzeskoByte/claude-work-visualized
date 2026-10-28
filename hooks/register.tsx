@@ -1,7 +1,8 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Activity, Ghost, Op, TreeEntry, TurnInfo } from '../types'
+import type { Activity, Clip, Ghost, Op, TreeEntry, TurnInfo } from '../types'
+import { MAX_BYTES, clipOf, codeLines, codeRule, currentClip, enqueue, isClipDone } from './code'
 import {
   COLOR, FAINT, ICON, IGNORED, LABEL, MUTED, T,
   buildRows, classifyBash, counted, diffTrees, emptyTurn, focusOf, headerLine, isAnimating, isUnscanned, legendLines, mix, remoteOf,
@@ -15,50 +16,73 @@ const MAX_ENTRIES = 2000
 const MAX_DEPTH = 12
 const FRAME_MS = 33 // ~30 fps while anything moves, the terminal's cap for a shown pane
 const POLL_MS = 1500 // how often the project is rescanned for changes made outside tool calls
+const SPLIT_COLUMNS = 96 // from this wide the code view sits beside the tree, else under it
+const EDITORS = new Set(['Edit', 'MultiEdit', 'Write'])
+const PANE_BG = '#000000'
 
 const tree = atom({ plugin: 'work-visualized', key: 'tree' } as const, [] as TreeEntry[])
 const activity = atom({ plugin: 'work-visualized', key: 'activity' } as const, {} as Record<string, Activity>)
 const ghosts = atom({ plugin: 'work-visualized', key: 'ghosts' } as const, {} as Record<string, Ghost>)
 const turn = atom({ plugin: 'work-visualized', key: 'turn' } as const, emptyTurn())
 const watching = atom({ plugin: 'work-visualized', key: 'watching' } as const, true)
+const clips = atom({ plugin: 'work-visualized', key: 'clips' } as const, [] as Clip[])
 
 // Drawing memory only: a reload starts these over, harmlessly.
 const folders: FolderMemory = new Map()
 let scroll = 0
+let codeScroll = 0
 let animateUntil = 0
 let isWatching = true // mirrors the watching atom for synchronous checks
 let home: string | undefined
 let scanning: Promise<unknown> = Promise.resolve()
+let lastListed: ReadonlySet<string> = new Set() // folders the last scan listed in full
+let changingCalls = 0 // tool calls that can change files, running now
 
-async function scanTree($: EngineInterface): Promise<TreeEntry[]> {
+/** The project's paths, and the folders listed in full: not cut off by the limit, nor failed. */
+async function scanTree($: EngineInterface): Promise<{ entries: TreeEntry[]; listed: Set<string> }> {
   const cwd = (await $.session.cwd()).replace(/\/+$/, '')
   const out: TreeEntry[] = []
+  const listed = new Set<string>()
   let level: string[] = ['']
   for (let depth = 0; depth < MAX_DEPTH && level.length > 0 && out.length < MAX_ENTRIES; depth++) {
     const next: string[] = []
-    const lists = await Promise.all(level.map(dir => $.fs.list(dir === '' ? cwd : `${cwd}/${dir}`).catch(() => [])))
+    const lists = await Promise.all(level.map(dir => $.fs.list(dir === '' ? cwd : `${cwd}/${dir}`).catch(() => undefined)))
     level.forEach((dir, i) => {
-      for (const entry of lists[i] ?? []) {
-        if (IGNORED.has(entry.name) || out.length >= MAX_ENTRIES) continue
+      const list = lists[i]
+      if (list === undefined) return
+      let isWhole = true
+      for (const entry of list) {
+        if (IGNORED.has(entry.name)) continue
+        if (out.length >= MAX_ENTRIES) {
+          isWhole = false
+          break
+        }
         const p = dir === '' ? entry.name : `${dir}/${entry.name}`
         const d = entry.kind === 'dir'
         out.push({ p, d, m: entry.mtimeMs })
         if (d) next.push(p)
       }
+      if (isWhole) listed.add(dir)
     })
     level = next
   }
-  return out
+  return { entries: out, listed }
 }
 
 /** Rescans the project and animates whatever changed that no tool call named. */
-function rescan($: EngineInterface, claimed: ReadonlySet<string>): Promise<unknown> {
+/** Why a rescan runs: right after a tool call that can change files, or the timer and other upkeep. */
+type ScanCause = 'tool' | 'poll'
+
+function rescan($: EngineInterface, claimed: ReadonlySet<string>, cause: ScanCause): Promise<unknown> {
   scanning = scanning.then(async () => {
-    const fresh = await scanTree($)
-    // Remote paths come from commands, not the scan, so they are kept as they are.
-    const before = (await read($, tree)).filter(t => !isUnscanned(t.p))
+    // Claude's doing: after its tool call, or while one still runs (a long build).
+    const isClaudes = cause === 'tool' || changingCalls > 0
+    const scan = await scanTree($)
+    const fresh = scan.entries
+    const before = await read($, tree)
     const now = await $.clock.now()
-    const diff = diffTrees(before, fresh)
+    const diff = diffTrees(before, fresh, { before: lastListed, after: scan.listed })
+    lastListed = scan.listed
     // Keep entries a running create put in early, so they don't blink out.
     const running = await read($, activity)
     const busy = new Set([...claimed, ...Object.keys(running).filter(p => (running[p]?.running ?? 0) > 0)])
@@ -86,7 +110,9 @@ function rescan($: EngineInterface, claimed: ReadonlySet<string>): Promise<unkno
         return out
       })
     }
+    // Only Claude's own changes count on the turn's card; others still animate in the tree.
     await update($, turn, info => {
+      if (info.phase !== 'working' || !isClaudes) return info
       let t = info
       for (const e of born) t = counted(t, 'create', e.p)
       for (const p of changed) t = counted(t, 'edit', p)
@@ -141,6 +167,14 @@ async function targetsOf($: EngineInterface, tool: string, input: Record<string,
   }
 }
 
+/** The file's text before an edit: empty for a new file, undefined when it can't be replayed. */
+async function textBefore($: EngineInterface, path: string, target: Target): Promise<string | undefined> {
+  if (target.op === 'create') return ''
+  const stat = await $.fs.stat(path).catch(() => undefined)
+  if (stat === undefined || stat.size > MAX_BYTES) return undefined
+  return $.fs.read(path).catch(() => undefined)
+}
+
 function setStatus($: EngineInterface, text: string | undefined) {
   if (text !== undefined && !isWatching) return
   try {
@@ -167,7 +201,7 @@ export const register: Register = on => {
     await update($, watching, () => isOn)
     isWatching = isOn
     startAnimating(now)
-    void rescan($, new Set())
+    void rescan($, new Set(), 'poll')
     if (isOn) void $.ui.open({ id: PANE, title: TITLE }).catch(() => undefined)
 
     // The frame clock: redraws while anything moves, and tidies spent state.
@@ -192,6 +226,8 @@ export const register: Register = on => {
             return out
           })
         }
+        const c = await read($, clips)
+        if (c.some(x => isClipDone(x, t))) await update($, clips, list => list.filter(x => !isClipDone(x, t)))
         if (!isAnimating(a, g, await read($, turn), t) && t > animateUntil - T.trail) animateUntil = Math.min(animateUntil, t + 1500)
       })()
     })
@@ -203,7 +239,7 @@ export const register: Register = on => {
       if (polling) return
       polling = true
       void (async () => {
-        if (await read($, watching)) await rescan($, new Set())
+        if (await read($, watching)) await rescan($, new Set(), 'poll')
       })().finally(() => {
         polling = false
       })
@@ -224,7 +260,7 @@ export const register: Register = on => {
     }
     await $.ui.open({ id: PANE, title: TITLE }).catch(() => undefined)
     startAnimating(await $.clock.now())
-    void rescan($, new Set())
+    void rescan($, new Set(), 'poll')
     return { text: 'Claude Work Visualized is on: watching the project live.' }
   })
 
@@ -283,7 +319,10 @@ export const register: Register = on => {
       if (first) setStatus($, `${ICON[first.op]} ${LABEL[first.op]} ${first.path}`)
     }
 
-    const ran = await next(e)
+    if (mutates) changingCalls++
+    const ran = await next(e).finally(() => {
+      if (mutates) changingCalls--
+    })
     const failed = ran.deny !== undefined || ran.isError === true
 
     const endedAt = await $.clock.now()
@@ -313,13 +352,19 @@ export const register: Register = on => {
       const left = await read($, activity)
       if (focusOf(left) === undefined) setStatus($, undefined)
     }
+    if (!failed && edited !== undefined && before !== undefined) {
+      // Read back from disk, so a formatter's changes show as well.
+      const after = await $.fs.read(filePath as string).catch(() => undefined)
+      const clip = after === undefined ? undefined : clipOf(edited.path, before, after, endedAt)
+      if (clip !== undefined) await update($, clips, list => enqueue(list, clip, endedAt))
+    }
     if (mutates) {
       // Deletes become ghosts through the rescan, so they play their exit.
       const claimed = new Set(targets.filter(t => t.op !== 'delete').map(t => t.path))
       if (failed) {
         await update($, tree, list => added.reduce((acc, t) => withoutPath(acc, t.path), list))
       }
-      void rescan($, claimed)
+      void rescan($, claimed, 'tool')
     }
     return ran
   })
@@ -332,53 +377,86 @@ export const register: Register = on => {
     const gh = await read($, ghosts)
     const info = await read($, turn)
     const root = (await $.session.cwd()).replace(/\/+$/, '').split('/').pop() ?? ''
-    const columns = Math.max(24, (e.props.bodyColumns ?? 40) - 1)
+    const paneColumns = Math.max(24, (e.props.bodyColumns ?? 40) - 1)
     const height = Math.max(8, e.props.scroll?.bodyRows ?? (e.viewport?.rows ?? 30) - 3)
+    const clip = currentClip(await read($, clips), now)
 
     const line = (segs: Seg[], key: string) => (
-      <Box key={key} flexDirection="row" height={1}>
+      <Box key={key} flexDirection="row" height={1} backgroundColor={PANE_BG}>
         {merge(segs).map(s => (
-          <Text color={s.c} backgroundColor={s.bg} bold={s.b} dimColor={s.dim} strikethrough={s.s} wrap="truncate">
+          <Text color={s.c} backgroundColor={s.bg ?? PANE_BG} bold={s.b} dimColor={s.dim} strikethrough={s.s} wrap="truncate">
             {s.t}
           </Text>
         ))}
       </Box>
     )
-    // `── label ─────`, a section rule.
-    const rule = (label: string, key: string, c = FAINT) =>
-      line([{ t: '── ', c: FAINT }, { t: label, c, b: true }, { t: ' ' + '─'.repeat(Math.max(0, columns - label.length - 4)), c: FAINT }], key)
-
-    const rows = buildRows({ tree: entries, activity: act, ghosts: gh, now, columns, folders })
-    const summary = summaryLines(info, now, columns - 4)
-    const legend = legendLines(columns)
-    const chrome = 3 + 1 + legend.length + 1 + (summary.length > 0 ? summary.length + 2 : 0)
-    const room = Math.max(3, height - chrome)
-    const focus = focusOf(act)
-    scroll = scrollTo(scroll, rows, focus, room)
-    const visible = rows.slice(scroll, scroll + room)
-    const above = scroll
-    const below = Math.max(0, rows.length - scroll - room)
-    const fileCount = entries.filter(t => !t.d).length
-    const age = now - info.at
-    const card = Math.min(smoothIn(age / 500), info.phase === 'complete' && age > T.summary - 1500 ? Math.max(0, (T.summary - age) / 1500) : 1)
-
-    return (
-      <Box flexDirection="column" width={columns}>
-        {line(headerLine(now, focus !== undefined || info.phase === 'working', root, remoteOf(act, now)), 'h')}
-        {line(statusLine(act, info, now, fileCount, columns), 's')}
-        {rule(above > 0 ? `tree ↑${above}` : 'tree', 'r1')}
-        {rows.length === 0 ? line([{ t: ' scanning…', c: MUTED }], 'empty') : visible.map(r => line(r.segs, r.key))}
-        {below > 0 && line([{ t: `   ↓ ${below} more`, c: FAINT }], 'down')}
-        {summary.length > 0 && (
-          <Box flexDirection="column" borderStyle="round" borderColor={mix(FAINT, COLOR.create, card * 0.8)} paddingX={1}>
-            {summary.map((segs, i) => line(segs, `sum${i}`))}
-          </Box>
-        )}
-        <Box flexGrow={1} />
-        {rule('legend', 'r2')}
-        {legend.map((segs, i) => line(segs, `leg${i}`))}
+    const isSplit = clip !== undefined && paneColumns >= SPLIT_COLUMNS
+    const treeColumns = isSplit ? Math.max(30, Math.min(48, Math.floor(paneColumns * 0.4))) : paneColumns
+    const codeColumns = isSplit ? paneColumns - treeColumns - 2 : paneColumns
+    const codeRows = clip === undefined
+      ? 0
+      : isSplit
+        ? height - 1
+        : Math.max(3, Math.min(Math.max(clip.before.length, clip.after.length) + 2, Math.floor(height * 0.45)))
+    const codeView = clip === undefined ? { lines: [], scroll: 0 } : codeLines(clip, now, codeColumns, codeRows, codeScroll)
+    codeScroll = codeView.scroll
+    const code = clip !== undefined && (
+      <Box flexDirection="column" width={codeColumns} backgroundColor={PANE_BG}>
+        {line(codeRule(clip, codeColumns), 'cr')}
+        {codeView.lines.map((segs, i) => line(segs, `c${i}`))}
       </Box>
     )
+
+    if (isSplit) {
+      return (
+        <Box flexDirection="row" width={paneColumns} flexGrow={1} backgroundColor={PANE_BG}>
+          {mapView(treeColumns)}
+          <Box width={2} backgroundColor={PANE_BG} />
+          {code}
+        </Box>
+      )
+    }
+    return mapView(paneColumns, code, clip === undefined ? 0 : codeRows + 1)
+
+    /** The tree with its header, status, summary card and legend; `under` goes below the tree. */
+    function mapView(columns: number, under?: RenderChildren, underRows = 0) {
+      // `── label ─────`, a section rule.
+      const rule = (label: string, key: string, c = FAINT) =>
+        line([{ t: '── ', c: FAINT }, { t: label, c, b: true }, { t: ' ' + '─'.repeat(Math.max(0, columns - label.length - 4)), c: FAINT }], key)
+
+      const rows = buildRows({ tree: entries, activity: act, ghosts: gh, now, columns, folders })
+      const summary = summaryLines(info, now, columns - 4)
+      const legend = legendLines(columns)
+      const chrome = 3 + 1 + legend.length + 1 + (summary.length > 0 ? summary.length + 2 : 0) + underRows
+      const room = Math.max(3, height - chrome)
+      const focus = focusOf(act)
+      scroll = scrollTo(scroll, rows, focus, room)
+      const visible = rows.slice(scroll, scroll + room)
+      const above = scroll
+      const below = Math.max(0, rows.length - scroll - room)
+      const fileCount = entries.filter(t => !t.d).length
+      const age = now - info.at
+      const card = Math.min(smoothIn(age / 500), info.phase === 'complete' && age > T.summary - 1500 ? Math.max(0, (T.summary - age) / 1500) : 1)
+
+      return (
+        <Box flexDirection="column" width={columns} flexGrow={1} backgroundColor={PANE_BG}>
+          {line(headerLine(now, focus !== undefined || info.phase === 'working', root), 'h')}
+          {line(statusLine(act, info, now, fileCount, columns), 's')}
+          {rule(above > 0 ? `tree ↑${above}` : 'tree', 'r1')}
+          {rows.length === 0 ? line([{ t: ' scanning…', c: MUTED }], 'empty') : visible.map(r => line(r.segs, r.key))}
+          {below > 0 && line([{ t: `   ↓ ${below} more`, c: FAINT }], 'down')}
+          {summary.length > 0 && (
+            <Box flexDirection="column" borderStyle="round" borderColor={mix(FAINT, COLOR.create, card * 0.8)} paddingX={1} backgroundColor={PANE_BG}>
+              {summary.map((segs, i) => line(segs, `sum${i}`))}
+            </Box>
+          )}
+          {under}
+          <Box flexGrow={1} backgroundColor={PANE_BG} />
+          {rule('legend', 'r2')}
+          {legend.map((segs, i) => line(segs, `leg${i}`))}
+        </Box>
+      )
+    }
   })
 }
 

@@ -25,6 +25,11 @@ deletes it, so you can see at a glance where Claude is working right now.
   tree under a folder per host (`deploy@web1:/etc/nginx/…`, `~` for the remote home), heredoc
   scripts and `for` loops included. While Claude works on a host, the header names it:
   `work-map ~/project → deploy@web1`.
+- **Code view:** each `Edit` and `Write` is replayed as keystrokes next to the tree: replaced
+  lines turn red and fold away, new lines type in behind a caret, small changes are selected,
+  backspaced and retyped in place, and gutter marks stay for a while after. Long lines wrap, the
+  view scrolls smoothly to the caret, and code is highlighted per language (about 60, through
+  Prism) in Tokyo Night colours.
 - **Completion card:** when a turn ends, a card shows how many files were viewed, edited, created
   and deleted, as filling bars.
 - **Terminal style:** only one-cell glyphs and box-drawing characters, up to 30 fps while anything
@@ -155,7 +160,10 @@ claude-work-visualized/
 │   ├── hooks.json               names the hooks module
 │   ├── register.tsx             hooks: tool calls, scanning, /watch, timers, the pane
 │   ├── model.ts                 pure logic: command parsing, scan diffs, the animation engine
-│   └── work.test.tsx            tests
+│   ├── code.ts                  pure logic of the code view: line diff and edit replay
+│   ├── vendor/prism.js          Prism syntax highlighter, bundled as one module
+│   ├── work.test.tsx            tests
+│   └── code.test.tsx            tests of the code view
 ├── types/index.d.ts             types for the data the mod keeps in session state
 ├── docs/                        documentation
 │   └── media/                   README screenshots and GIF
@@ -175,13 +183,13 @@ claude-work-visualized/
 - **Shell commands:** files touched by `rm`, `mv`, `cp`, `touch`, `mkdir`, `cat`, `sed -i`, `>`
   and similar are recognised by reading the command text. Anything else is caught by the rescan
   after the command and shown as finished, without a "running" phase.
-- **Other folders:** files outside the session folder show under `~:/` (your home folder) or
-  `local:/`. Shell commands are followed through `cd` and `NAME=value`.
-- **Remote work:** only what the command text names is shown; remote folders are not scanned, so
-  a change a remote script makes on its own is not seen.
-- **Changes made outside Claude:** they show up too, animated as if Claude had made them.
+- **Changes made outside Claude:** they show up too, animated as if Claude had made them, but the
+  completion card counts only what Claude's own tool calls changed.
 - **Skipped folders:** `node_modules`, `.git`, `dist`, `build`, caches and virtual environments
   are left out of the tree.
+- **Code view:** only `Edit`, `MultiEdit` and `Write` are replayed; a file changed through a
+  shell command shows in the tree only. Files over 256 KB are skipped, and one replay shows at
+  most 80 lines.
 - **Size limit:** a scan covers at most 2,000 entries, 12 levels deep.
 - **Colours:** tuned for dark terminal themes.
 

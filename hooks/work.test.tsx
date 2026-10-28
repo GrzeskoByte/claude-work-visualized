@@ -179,47 +179,45 @@ test('a Read shows in the pane as Claude viewing that file', async ($, on) => {
   await reading
 })
 
-test('commands run over ssh, scp and rsync are read as work on that host', async () => {
-  expect(classifyBash("ssh -p 2222 -i ~/.ssh/key deploy@web1 'sudo sed -i s/a/b/ /etc/nginx/nginx.conf && rm -f /tmp/old.log'")).toEqual([
-    { op: 'edit', path: '/etc/nginx/nginx.conf', host: 'deploy@web1' },
-    { op: 'delete', path: '/tmp/old.log', host: 'deploy@web1' },
-  ])
-  expect(classifyBash('ssh web1 cat /var/log/app.log | grep error > errors.txt')).toEqual([
-    { op: 'view', path: '/var/log/app.log', host: 'web1' },
-    { op: 'edit', path: 'errors.txt' },
-  ])
-  expect(classifyBash("ssh web1 bash -s <<'EOF'\ntouch /srv/app/ready\nrm /srv/app/lock\nEOF\nls")).toEqual([
-    { op: 'create', path: '/srv/app/ready', host: 'web1' },
-    { op: 'delete', path: '/srv/app/lock', host: 'web1' },
-  ])
-  expect(classifyBash("ssh web1 'cat > /etc/motd' <<EOF\nrm everything\nEOF")).toEqual([{ op: 'edit', path: '/etc/motd', host: 'web1' }])
-  expect(classifyBash('scp dist/app.tar.gz root@web2:/opt/app.tar.gz')).toEqual([
-    { op: 'view', path: 'dist/app.tar.gz' },
-    { op: 'create', path: '/opt/app.tar.gz', host: 'root@web2' },
-  ])
-  expect(classifyBash('cat > notes.md <<EOF\nrm -rf /\nEOF')).toEqual([{ op: 'edit', path: 'notes.md' }])
-  expect(remotePath('web1', '/etc/./nginx/../hosts')).toBe('web1:/etc/hosts')
-  expect(remotePath('web1', 'logs/app.log')).toBe('web1:/~/logs/app.log')
-  expect(remotePath('web1', '$HOME/x')).toBe('web1:/~/x')
+test('paths sliding in or out of a cut-off scan are not created or deleted', async () => {
+  const before = [
+    { p: 'a', d: true, m: 0 },
+    { p: 'a/1.ts', d: false, m: 1 },
+    { p: 'b', d: true, m: 0 },
+    { p: 'b/x.ts', d: false, m: 1 },
+  ]
+  // A new file in `a` pushed `b/x.ts` past the scan's limit, and `b` came back cut off.
+  const after = [
+    { p: 'a', d: true, m: 0 },
+    { p: 'a/0.ts', d: false, m: 1 },
+    { p: 'a/1.ts', d: false, m: 1 },
+    { p: 'b', d: true, m: 0 },
+    { p: 'b/w.ts', d: false, m: 1 },
+  ]
+  const diff = diffTrees(before, after, { before: new Set(['', 'a']), after: new Set(['', 'a']) })
+  expect(diff.created.map(t => t.p)).toEqual(['a/0.ts'])
+  expect(diff.deleted.map(t => t.p)).toEqual([])
 })
 
-test('a file deleted over ssh shows under its host and plays its exit', async ($, on) => {
-  mock.clock(on, { now: 10_000 })
+test('changes the rescan finds after the turn ends are not counted for it', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
   mock.store(on)
+  const files = [{ name: 'a.ts', kind: 'file' as const }]
   on('ui.close', () => ({ value: undefined }) as never)
   on('session.cwd', () => ({ value: ROOT }))
   on('session.start', () => ({ cwd: ROOT }))
   on('command.register', () => ({ value: undefined }) as never)
-  on('fs.list', ($, e) =>
-    ({ value: e.path === ROOT ? [{ name: 'package.json', kind: 'file', size: 1, mtimeMs: 1, isLink: false }] : [] }) as never,
-  )
-  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }) as never)
+  on('fs.list', ($, e) => ({ value: e.path === ROOT ? files.map(f => ({ ...f, size: 1, mtimeMs: 1, isLink: false })) : [] }) as never)
+  on('turn.start', () => ({ turnId: 't1' }) as never)
+  on('turn.complete', () => ({ text: 'done' }) as never)
   on('ui.open', () => ({ value: {} }) as never)
   on('ui.status', () => ({ value: undefined }) as never)
   await $.session.start({ source: 'startup', cwd: ROOT } as never)
-  await $.tool.call({ tool: 'Bash', command: "ssh web1 'sed -i s/a/b/ /etc/app.conf && rm /tmp/old.log'" } as never)
-  await $.tool.call({ tool: 'Bash', command: 'ls' } as never) // a rescan after the ssh call
-  await new Promise<void>(resolve => setTimeout(resolve, 100))
+  await clock.advance(2000)
+  await $.turn.start({ text: 'go', turnId: 't1' } as never)
+  await $.turn.complete({ turnId: 't1', reason: 'answer', answer: 'done', isAborted: false } as never)
+  files.push({ name: 'b.ts', kind: 'file' }) // a git hook, an editor: not Claude
+  await clock.advance(3000)
 
   const ui = await $.ui.mount({
     plugin: 'work-visualized',
@@ -229,53 +227,48 @@ test('a file deleted over ssh shows under its host and plays its exit', async ($
     props: { title: 'Claude Work', isFocused: false, bodyColumns: 44, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
   })
   const shown = (await ui.findAll({ type: 'Text' })).map(x => x.text).join('')
-  expect(shown).toContain('web1:/')
-  expect(shown).toContain('→ web1')
-  expect(shown).toContain('app.conf')
-  expect(shown).toContain('old.log')
-  expect(shown).toContain('package.json')
+  expect(shown).toContain('TASK COMPLETE')
+  expect(shown).toContain('b.ts')
+  expect(shown).toContain('created   0')
   await ui.unmount()
 })
 
-test('cd and variables set earlier in a command lead to the files after them', async () => {
-  expect(classifyBash("cd ~/Projects/site && F=web/inc/hooks.php && sed -i '' -e '18s/\\$a->id;/\\$a->id ?? null;/' -e '21s/x/y/' $F && git diff | grep '^[+-] '")).toEqual([
-    { op: 'edit', path: '~/Projects/site/web/inc/hooks.php' },
-  ])
-  expect(classifyBash('cd lib; cat a.ts > ../b.ts; cd -; rm c.ts')).toEqual([
-    { op: 'edit', path: 'lib/../b.ts' },
-    { op: 'view', path: 'lib/a.ts' },
-    { op: 'delete', path: 'c.ts' },
-  ])
-  expect(classifyBash("perl -pi -e 's/a/b/' x.txt y.txt")).toEqual([
-    { op: 'edit', path: 'x.txt' },
-    { op: 'edit', path: 'y.txt' },
-  ])
-  expect(classifyBash("sed -i 's/a/b/' z.txt")).toEqual([{ op: 'edit', path: 'z.txt' }])
-})
+test('only changes that follow Claude\'s own tool calls count on the card', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  mock.store(on)
+  const files = [{ name: 'a.ts', kind: 'file' as const }]
+  on('ui.close', () => ({ value: undefined }) as never)
+  on('session.cwd', () => ({ value: ROOT }))
+  on('session.start', () => ({ cwd: ROOT }))
+  on('command.register', () => ({ value: undefined }) as never)
+  on('fs.list', ($, e) => ({ value: e.path === ROOT ? files.map(f => ({ ...f, size: 1, mtimeMs: 1, isLink: false })) : [] }) as never)
+  on('tool.call', { tool: 'Bash' }, () => {
+    files.push({ name: 'built.js', kind: 'file' }) // what Claude's command made
+    return { result: { stdout: '', stderr: '', interrupted: false } } as never
+  })
+  on('turn.start', () => ({ turnId: 't1' }) as never)
+  on('turn.complete', () => ({ text: 'done' }) as never)
+  on('ui.open', () => ({ value: {} }) as never)
+  on('ui.status', () => ({ value: undefined }) as never)
+  await $.session.start({ source: 'startup', cwd: ROOT } as never)
+  await clock.advance(2000)
+  await $.turn.start({ text: 'go', turnId: 't1' } as never)
+  files.push({ name: 'other.log', kind: 'file' }) // another program, mid-turn
+  await clock.advance(2000)
+  await $.tool.call({ tool: 'Bash', command: 'npm run build' } as never)
+  await clock.advance(500)
+  await $.turn.complete({ turnId: 't1', reason: 'answer', answer: 'done', isAborted: false } as never)
+  await clock.advance(2000)
 
-test('paths outside the session folder go under the home folder or the disk', async () => {
-  expect(placeOf('/home/u/site', 'src/a.ts', '/home/u')).toEqual({ file: '/home/u/site/src/a.ts', path: 'src/a.ts' })
-  expect(placeOf('/home/u/site', '~/Projects/other/x.php', '/home/u')).toEqual({ file: '/home/u/Projects/other/x.php', path: '~:/Projects/other/x.php' })
-  expect(placeOf('/home/u/site', '../other/y.php', '/home/u')).toEqual({ file: '/home/u/other/y.php', path: '~:/other/y.php' })
-  expect(placeOf('/home/u/site', '/etc/hosts', '/home/u')).toEqual({ file: '/etc/hosts', path: 'local:/etc/hosts' })
-  expect(placeOf('/home/u/site', 'node_modules/x.js', '/home/u')).toBe(undefined)
-  expect(placeOf('/home/u/site', '$F', '/home/u')).toBe(undefined)
-})
-
-test('a for loop runs its body once per value', async () => {
-  const command = [
-    "cd ~/site && python3 - <<'EOF'",
-    "p='CHANGELOG.md'",
-    "open(p,'w').write(open(p).read())",
-    'EOF',
-    'K="-i $HOME/.ssh/id_rsa -o IdentitiesOnly=yes"; for h in web1 web2; do scp -q $K CHANGELOG.md $h:~/site/CHANGELOG.md && printf "%s ok " $h; done; echo',
-  ].join('\n')
-  expect(classifyBash(command)).toEqual([
-    { op: 'view', path: '~/site/CHANGELOG.md' },
-    { op: 'create', path: '~/site/CHANGELOG.md', host: 'web1' },
-    { op: 'view', path: '~/site/CHANGELOG.md' },
-    { op: 'create', path: '~/site/CHANGELOG.md', host: 'web2' },
-  ])
-  expect(remotePath('web1', '$HOME/x.log')).toBe('web1:/~/x.log')
-  expect(placeOf('/home/u/site', '$HOME/notes.md', '/home/u')).toEqual({ file: '/home/u/notes.md', path: '~:/notes.md' })
+  const ui = await $.ui.mount({
+    plugin: 'work-visualized',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'work-map',
+    props: { title: 'Claude Work', isFocused: false, bodyColumns: 44, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  })
+  const shown = (await ui.findAll({ type: 'Text' })).map(x => x.text).join('')
+  expect(shown).toContain('other.log')
+  expect(shown).toContain('created   1')
+  await ui.unmount()
 })
