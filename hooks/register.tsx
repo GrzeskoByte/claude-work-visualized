@@ -28,35 +28,54 @@ let scroll = 0
 let animateUntil = 0
 let isWatching = true // mirrors the watching atom for synchronous checks
 let scanning: Promise<unknown> = Promise.resolve()
+let lastListed: ReadonlySet<string> = new Set() // folders the last scan listed in full
+let changingCalls = 0 // tool calls that can change files, running now
 
-async function scanTree($: EngineInterface): Promise<TreeEntry[]> {
+/** The project's paths, and the folders listed in full: not cut off by the limit, nor failed. */
+async function scanTree($: EngineInterface): Promise<{ entries: TreeEntry[]; listed: Set<string> }> {
   const cwd = (await $.session.cwd()).replace(/\/+$/, '')
   const out: TreeEntry[] = []
+  const listed = new Set<string>()
   let level: string[] = ['']
   for (let depth = 0; depth < MAX_DEPTH && level.length > 0 && out.length < MAX_ENTRIES; depth++) {
     const next: string[] = []
-    const lists = await Promise.all(level.map(dir => $.fs.list(dir === '' ? cwd : `${cwd}/${dir}`).catch(() => [])))
+    const lists = await Promise.all(level.map(dir => $.fs.list(dir === '' ? cwd : `${cwd}/${dir}`).catch(() => undefined)))
     level.forEach((dir, i) => {
-      for (const entry of lists[i] ?? []) {
-        if (IGNORED.has(entry.name) || out.length >= MAX_ENTRIES) continue
+      const list = lists[i]
+      if (list === undefined) return
+      let isWhole = true
+      for (const entry of list) {
+        if (IGNORED.has(entry.name)) continue
+        if (out.length >= MAX_ENTRIES) {
+          isWhole = false
+          break
+        }
         const p = dir === '' ? entry.name : `${dir}/${entry.name}`
         const d = entry.kind === 'dir'
         out.push({ p, d, m: entry.mtimeMs })
         if (d) next.push(p)
       }
+      if (isWhole) listed.add(dir)
     })
     level = next
   }
-  return out
+  return { entries: out, listed }
 }
 
 /** Rescans the project and animates whatever changed that no tool call named. */
-function rescan($: EngineInterface, claimed: ReadonlySet<string>): Promise<unknown> {
+/** Why a rescan runs: right after a tool call that can change files, or the timer and other upkeep. */
+type ScanCause = 'tool' | 'poll'
+
+function rescan($: EngineInterface, claimed: ReadonlySet<string>, cause: ScanCause): Promise<unknown> {
   scanning = scanning.then(async () => {
-    const fresh = await scanTree($)
+    // Claude's doing: after its tool call, or while one still runs (a long build).
+    const isClaudes = cause === 'tool' || changingCalls > 0
+    const scan = await scanTree($)
+    const fresh = scan.entries
     const before = await read($, tree)
     const now = await $.clock.now()
-    const diff = diffTrees(before, fresh)
+    const diff = diffTrees(before, fresh, { before: lastListed, after: scan.listed })
+    lastListed = scan.listed
     // Keep entries a running create put in early, so they don't blink out.
     const running = await read($, activity)
     const busy = new Set([...claimed, ...Object.keys(running).filter(p => (running[p]?.running ?? 0) > 0)])
@@ -84,7 +103,9 @@ function rescan($: EngineInterface, claimed: ReadonlySet<string>): Promise<unkno
         return out
       })
     }
+    // Only Claude's own changes count on the turn's card; others still animate in the tree.
     await update($, turn, info => {
+      if (info.phase !== 'working' || !isClaudes) return info
       let t = info
       for (const e of born) t = counted(t, 'create', e.p)
       for (const p of changed) t = counted(t, 'edit', p)
@@ -165,7 +186,7 @@ export const register: Register = on => {
     await update($, watching, () => isOn)
     isWatching = isOn
     startAnimating(now)
-    void rescan($, new Set())
+    void rescan($, new Set(), 'poll')
     if (isOn) void $.ui.open({ id: PANE, title: TITLE }).catch(() => undefined)
 
     // The frame clock: redraws while anything moves, and tidies spent state.
@@ -201,7 +222,7 @@ export const register: Register = on => {
       if (polling) return
       polling = true
       void (async () => {
-        if (await read($, watching)) await rescan($, new Set())
+        if (await read($, watching)) await rescan($, new Set(), 'poll')
       })().finally(() => {
         polling = false
       })
@@ -222,7 +243,7 @@ export const register: Register = on => {
     }
     await $.ui.open({ id: PANE, title: TITLE }).catch(() => undefined)
     startAnimating(await $.clock.now())
-    void rescan($, new Set())
+    void rescan($, new Set(), 'poll')
     return { text: 'Claude Work Visualized is on: watching the project live.' }
   })
 
@@ -281,7 +302,10 @@ export const register: Register = on => {
       if (first) setStatus($, `${ICON[first.op]} ${LABEL[first.op]} ${first.path}`)
     }
 
-    const ran = await next(e)
+    if (mutates) changingCalls++
+    const ran = await next(e).finally(() => {
+      if (mutates) changingCalls--
+    })
     const failed = ran.deny !== undefined || ran.isError === true
 
     const endedAt = await $.clock.now()
@@ -310,7 +334,7 @@ export const register: Register = on => {
       if (failed) {
         await update($, tree, list => added.reduce((acc, t) => withoutPath(acc, t.path), list))
       }
-      void rescan($, claimed)
+      void rescan($, claimed, 'tool')
     }
     return ran
   })
