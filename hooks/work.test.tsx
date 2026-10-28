@@ -1,7 +1,10 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { buildRows, classifyBash, diffTrees, emptyTurn, focusOf, relPath, statusLine, summaryLines, T } from './model'
+import { buildRows, classifyBash, diffTrees, emptyTurn, focusOf, placeOf, relPath, remotePath, statusLine, summaryLines, T } from './model'
 import type { FolderMemory } from './model'
+
+// The test environment has it; the engine's typings leave it out.
+declare function setTimeout(run: () => void, ms: number): unknown
 
 const ROOT = '/proj'
 const FILES: Record<string, { name: string; kind: 'file' | 'dir' }[]> = {
