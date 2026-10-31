@@ -35,6 +35,12 @@ deletes it, so you can see at a glance where Claude is working right now.
   read (a wave of dots and a seconds count hold its place until the words arrive), with a blinking cursor, in up to 12 lines. Scroll over it to read back. It stays until 20 s
   after the turn ends. Needs `"showThinkingSummaries": true` in
   `~/.claude/settings.json`: without it Claude Code receives thinking with no text.
+- **Git graph:** when Claude runs `git` or `gh`, a small branch graph appears under the prompt
+  line: checkouts move the `◉` HEAD marker, new commits pop in, merges light up the joining lines,
+  pushes and pulls count commits ahead and behind, the prompt line names the action as it runs
+  (`❯ committing Add notes 0.4s`) with the commit's message waiting green above HEAD, and
+  `gh pr create` / `gh pr merge` show a PR card for 20 s, then just `#7 open` in the graph's title
+  (`/prs` hides them). It stays for a minute after the last git command.
 - **Completion card:** when a turn ends, a card shows how many files were viewed, edited, created
   and deleted, as filling bars.
 - **Terminal style:** only one-cell glyphs and box-drawing characters, up to 30 fps while anything
@@ -46,6 +52,7 @@ deletes it, so you can see at a glance where Claude is working right now.
 | --- | --- |
 | `/watch` | Turns the work map on or off (opens or closes the pane). The choice is remembered across sessions. |
 | `/diffs` | Switches edit results in the chat between one line and the full diff. The choice is remembered across sessions. |
+| `/prs` | Shows or hides pull requests in the git graph. The choice is remembered across sessions. |
 
 - When it's on, the pane opens by itself at session start once the terminal is at least 144
   columns wide. `/watch` opens it at any width.

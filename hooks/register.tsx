@@ -1,9 +1,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Activity, Clip, Ghost, Op, Thought, TreeEntry, TurnInfo } from '../types'
+import type { Activity, Clip, Ghost, GitAction, GitState, Op, Thought, TreeEntry, TurnInfo } from '../types'
 import { HOLD, MAX_BYTES, browseAfter, clipKey, clipOf, codeLines, codeRule, currentClip, enqueue, fileLines, isClipDone, patchStats } from './code'
 import type { Browse, CodeArea } from './code'
+import {
+  AHEAD_ARGV, gitActionsOf, gitDoingOf, gitEnded, gitFade, gitRead, gitStarted, gitView, graphArgv, mainAction, parseGraph, prBaseOf, prNumberOf, refsAfter,
+  repoDir,
+} from './git'
+import type { GitRead, PrShown } from './git'
 import {
   CLAUDE, COLOR, FAINT, ICON, IGNORED, LABEL, MUTED, T,
   buildRows, classifyBash, counted, mentionsOf, diffTrees, emptyTurn, focusOf, headerLine, heldFocusOf, isAnimating, isUnscanned, legendLines, mix, remoteOf,
@@ -18,7 +23,7 @@ const MAX_ENTRIES = 2000
 const MAX_DEPTH = 12
 const FRAME_MS = 33 // ~30 fps while anything moves, the terminal's cap for a shown pane
 const POLL_MS = 1500 // how often the project is rescanned for changes made outside tool calls
-const SPLIT_COLUMNS = 96 // from this wide the code view sits beside the tree, else under it
+const SPLIT_COLUMNS = 84 // from this wide thinking, git and the code view sit beside the tree
 const EDITORS = new Set(['Edit', 'MultiEdit', 'Write'])
 const MAX_REPLAYS = 4 // files of one tool call the code view checks and replays
 /** How an edit's result shows in the chat: one line while the pane replays it, or the full diff. */
@@ -34,6 +39,7 @@ const turn = atom({ plugin: 'work-visualized', key: 'turn' } as const, emptyTurn
 const watching = atom({ plugin: 'work-visualized', key: 'watching' } as const, true)
 const clips = atom({ plugin: 'work-visualized', key: 'clips' } as const, [] as Clip[])
 const thought = atom({ plugin: 'work-visualized', key: 'thought' } as const, null as Thought | null)
+const git = atom({ plugin: 'work-visualized', key: 'git' } as const, null as GitState | null)
 
 // Drawing memory only: a reload starts these over, harmlessly.
 const folders: FolderMemory = new Map()
@@ -44,13 +50,14 @@ let codeArea: CodeArea | undefined // where the code view was drawn last frame
 let shownClip: Clip | undefined
 let typed = { key: '', n: 0, at: 0 } // how far the typewriter has got through the thought
 let thinkBrowse: { key: string; top: number; at: number } | undefined // the person scrolling back through the thought
-let thinkRows: { from: number; to: number; columns: number } | undefined // pane rows the thinking section was drawn on last frame
+let thinkArea: { column: number; row: number; columns: number; rows: number } | undefined // where the thinking section was drawn last frame
 let thinkTop = 0 // the thought's first line shown last frame
 let writing: { tool: string; bytes: number; at: number } | undefined // a tool call the model is still writing
 let animateUntil = 0
 let isWatching = true // mirrors the watching atom for synchronous checks
 let chatDiffs: ChatDiffs = 'quiet'
 let home: string | undefined
+let prs: PrShown = 'shown'
 let scanning: Promise<unknown> = Promise.resolve()
 let lastListed: ReadonlySet<string> = new Set() // folders the last scan listed in full
 let changingCalls = 0 // tool calls that can change files, running now
@@ -229,7 +236,12 @@ export const register: Register = on => {
       name: 'diffs',
       description: 'Toggle full edit diffs in the chat while the work pane replays them',
     }).catch(() => undefined)
+    await $.command.register({
+      name: 'prs',
+      description: 'Toggle pull requests in the work pane\'s git graph',
+    }).catch(() => undefined)
     chatDiffs = (await $.store.get('chatDiffs').catch(() => undefined)) === 'full' ? 'full' : 'quiet'
+    prs = (await $.store.get('prs').catch(() => undefined)) === 'hidden' ? 'hidden' : 'shown'
     const now = await $.clock.now()
     const stored = await $.store.get('watching').catch(() => undefined)
     const isOn = stored !== false
@@ -264,7 +276,8 @@ export const register: Register = on => {
         const c = await read($, clips)
         const isKept = (x: Clip) => !isClipDone(x, t) || isBrowsed(x, t)
         if (c.some(x => !isKept(x))) await update($, clips, list => list.filter(isKept))
-        if (!isAnimating(a, g, await read($, turn), t, await read($, thought)) && t > animateUntil - T.trail) animateUntil = Math.min(animateUntil, t + 1500)
+        const isGitShown = gitFade(await read($, git), t) < 1
+        if (!isAnimating(a, g, await read($, turn), t, await read($, thought)) && !isGitShown && t > animateUntil - T.trail) animateUntil = Math.min(animateUntil, t + 1500)
       })()
     })
 
@@ -275,13 +288,27 @@ export const register: Register = on => {
       if (polling) return
       polling = true
       void (async () => {
-        if (await read($, watching)) await rescan($, new Set(), 'poll')
+        if (!(await read($, watching))) return
+        await rescan($, new Set(), 'poll')
+        // A long command (a script that commits, a slow push) shows its commits as they land.
+        const gs = await read($, git)
+        if (gs === null || gs.endedAt !== undefined) return
+        const fresh = await readGit($, gs.dir, gs.refs)
+        const polledAt = await $.clock.now()
+        if (fresh !== undefined) await update($, git, s => (s === null || s.endedAt !== undefined || s.dir !== gs.dir ? s : gitRead(s, fresh, polledAt)))
       })().finally(() => {
         polling = false
       })
     })
 
     return next(e)
+  })
+
+  on('command.run', { command: 'prs' }, async $ => {
+    prs = prs === 'shown' ? 'hidden' : 'shown'
+    await $.store.set('prs', prs).catch(() => undefined)
+    $.ui.invalidate('ui.render')
+    return { text: prs === 'shown' ? 'Pull requests show in the git graph.' : 'Pull requests are hidden from the git graph. /prs shows them again.' }
   })
 
   on('command.run', { command: 'diffs' }, async $ => {
@@ -502,12 +529,49 @@ export const register: Register = on => {
     return ran
   })
 
+  // Git and gh commands: the branch graph is read again after each, and the command animates on it.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const command = String((e as { command?: unknown }).command ?? '')
+    const actions = gitActionsOf(command)
+    const action = mainAction(actions)
+    if (action === undefined || !isWatching) return next(e)
+    const cwd = await $.session.cwd()
+    // The repository the command ran in; a folder hidden in a variable can't be read.
+    const dir = repoDir(action.dir, cwd, await $.env.get('HOME').catch(() => undefined))
+    if (dir === undefined) return next(e)
+    const known = await read($, git)
+    if (known === null || known.dir !== dir) {
+      const first = await readGit($, dir, [])
+      if (first === undefined) return next(e)
+      await update($, git, () => gitEnded(gitStarted(null, action, 0, dir), first, [], false, 0))
+    }
+    const startedAt = await $.clock.now()
+    const before = await read($, git)
+    await update($, git, s => gitStarted(s, action, startedAt, dir))
+    startAnimating(startedAt)
+
+    const ran = await next(e)
+    const isFailed = ran.deny !== undefined || ran.isError === true
+    const stdout = String((ran.result as { stdout?: unknown } | undefined)?.stdout ?? '')
+    const refs = refsAfter(before?.refs ?? [], action, before?.head ?? '')
+    const fresh = await readGit($, dir, refs)
+    const now = await $.clock.now()
+    await update($, git, s => {
+      const ended = gitEnded(s ?? gitStarted(null, action, now, dir), fresh, refs, isFailed, now)
+      return isFailed ? ended : withPr(ended, actions, command, stdout, now)
+    })
+    startAnimating(now)
+    return ran
+  })
+
   // The wheel over the thinking section scrolls back through the thought; the wheel, a touchpad or
   // the scroll keys over the code view move through the edited file.
   on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     const th = await read($, thought)
-    const pointer = e.pointer
-    if (th !== null && thinkRows !== undefined && pointer !== undefined && pointer.row >= thinkRows.from && pointer.row < thinkRows.to && pointer.column < thinkRows.columns) {
+    const p = e.pointer
+    const a = thinkArea
+    const isOver = p !== undefined && a !== undefined && p.column >= a.column && p.column < a.column + a.columns && p.row >= a.row && p.row < a.row + a.rows
+    if (th !== null && isOver) {
       const from = thinkBrowse !== undefined && turnOf(thinkBrowse.key) === turnOf(th.key) ? thinkBrowse.top : thinkTop
       thinkBrowse = { key: th.key, top: Math.max(0, from + e.by * WHEEL_LINES), at: await $.clock.now() }
       $.ui.invalidate('ui.render')
@@ -528,7 +592,9 @@ export const register: Register = on => {
     const gh = await read($, ghosts)
     const info = await read($, turn)
     const th = await read($, thought)
-    const root = (await $.session.cwd()).replace(/\/+$/, '').split('/').pop() ?? ''
+    const gs = await read($, git)
+    const sessionRoot = (await $.session.cwd()).replace(/\/+$/, '')
+    const root = sessionRoot.split('/').pop() ?? ''
     const paneColumns = Math.max(24, (e.props.bodyColumns ?? 40) - 1)
     const height = Math.max(8, e.props.scroll?.bodyRows ?? (e.viewport?.rows ?? 30) - 3)
     const list = await read($, clips)
@@ -548,80 +614,112 @@ export const register: Register = on => {
         ))}
       </Box>
     )
-    const isSplit = clip !== undefined && paneColumns >= SPLIT_COLUMNS
-    const treeColumns = isSplit ? Math.max(30, Math.min(48, Math.floor(paneColumns * 0.4))) : paneColumns
-    const codeColumns = isSplit ? paneColumns - treeColumns - 2 : paneColumns
-    const codeRows = clip === undefined
-      ? 0
-      : isSplit
-        ? height - 1
-        : Math.max(3, Math.min(Math.max(clip.before.length, clip.after.length) + 2, Math.floor(height * 0.45)))
-    let view: { from: number; to: number } | undefined
-    let codeSegs: Seg[][] = []
-    if (clip !== undefined && browse !== undefined) {
-      const shown = fileLines(clip, codeColumns, codeRows, browse.top)
-      browse = { ...browse, top: shown.top }
-      view = { from: shown.from, to: shown.to }
-      codeSegs = shown.lines
-    } else if (clip !== undefined) {
-      const replay = codeLines(clip, now, codeColumns, codeRows, codeScroll)
-      codeScroll = replay.scroll
-      codeSegs = replay.lines
-    }
-    codeArea = clip === undefined ? undefined : { column: isSplit ? treeColumns + 2 : 0, row: 0, columns: codeColumns, rows: codeRows + 1 }
-    const code = clip !== undefined && (
-      <Box flexDirection="column" width={codeColumns} backgroundColor={PANE_BG}>
-        {line(codeRule(clip, codeColumns, view), 'cr')}
-        {codeSegs.map((segs, i) => line(segs, `c${i}`))}
-      </Box>
-    )
-
-    if (isSplit) {
-      return (
-        <Box flexDirection="row" width={paneColumns} flexGrow={1} backgroundColor={PANE_BG}>
-          {mapView(treeColumns)}
-          <Box width={2} backgroundColor={PANE_BG} />
-          {code}
-        </Box>
+    // `── label ─────`, a section rule; a plain rule when the label is empty.
+    const rule = (label: string, key: string, columns: number, c = FAINT) =>
+      line(
+        label === ''
+          ? [{ t: '─'.repeat(columns), c: FAINT }]
+          : [{ t: '── ', c: FAINT }, { t: label, c, b: true }, { t: ' ' + '─'.repeat(Math.max(0, columns - label.length - 4)), c: FAINT }],
+        key,
       )
+
+    if (th !== null) {
+      // A new block in the same turn types on from where the last left off; a new turn starts over.
+      if (turnOf(th.key) !== turnOf(typed.key)) typed = { key: th.key, n: th.dropped, at: now }
+      const pace = th.endedAt === undefined ? 'reading' : 'late'
+      typed = { key: th.key, n: typeTo(typed.n, th.dropped + th.text.length, Math.min(250, now - typed.at), pace), at: now }
     }
-    return mapView(paneColumns, code, clip === undefined ? 0 : codeRows + 1)
+    if (thinkBrowse !== undefined && (th === null || turnOf(thinkBrowse.key) !== turnOf(th.key) || now - thinkBrowse.at > BROWSE_HOLD)) thinkBrowse = undefined
+    // The prompt line already says thinking while Claude thinks: the section then needs no title.
+    const saysThinking = heldFocusOf(act, now) === undefined && gitDoingOf(gs, now) === undefined && writing === undefined && info.phase === 'working'
 
-    /** The tree with its header, status, summary card and legend; `under` goes below the tree. */
-    function mapView(columns: number, under?: RenderChildren, underRows = 0) {
-      // `── label ─────`, a section rule; a plain rule when the label is empty.
-      const rule = (label: string, key: string, c = FAINT) =>
-        line(
-          label === ''
-            ? [{ t: '─'.repeat(columns), c: FAINT }]
-            : [{ t: '── ', c: FAINT }, { t: label, c, b: true }, { t: ' ' + '─'.repeat(Math.max(0, columns - label.length - 4)), c: FAINT }],
-          key,
-        )
-
-      const rows = buildRows({ tree: entries, activity: act, ghosts: gh, now, columns, folders })
-      if (th !== null) {
-        // A new block in the same turn types on from where the last left off; a new turn starts over.
-        if (turnOf(th.key) !== turnOf(typed.key)) typed = { key: th.key, n: th.dropped, at: now }
-        const pace = th.endedAt === undefined ? 'reading' : 'late'
-        typed = { key: th.key, n: typeTo(typed.n, th.dropped + th.text.length, Math.min(250, now - typed.at), pace), at: now }
-      }
-      if (thinkBrowse !== undefined && (th === null || turnOf(thinkBrowse.key) !== turnOf(th.key) || now - thinkBrowse.at > BROWSE_HOLD)) thinkBrowse = undefined
-      const think = thoughtView({ thought: th, typed: typed.n, now, turn: info, columns, rows: thoughtRows(height), top: thinkBrowse?.top })
-      const thinking = think.lines
+    /** The thinking section at `at` in the pane: its rule, plain while the prompt line says thinking, and its lines. */
+    function thinkingSection(columns: number, rows: number, at: { column: number; row: number }) {
+      const think = thoughtView({ thought: th, typed: typed.n, now, turn: info, columns, rows, top: thinkBrowse?.top })
       thinkTop = think.top
       // Scrolled back down to the end: follow the typing again.
       if (thinkBrowse !== undefined && think.below === 0) thinkBrowse = undefined
       else if (thinkBrowse !== undefined) thinkBrowse = { ...thinkBrowse, top: think.top }
-      // The prompt line already says thinking while Claude thinks: the section then needs no title.
-      const saysThinking = heldFocusOf(act, now) === undefined && writing === undefined && info.phase === 'working'
       const arrows = `${think.above > 0 ? ` ↑${think.above}` : ''}${think.below > 0 ? ` ↓${think.below}` : ''}`.trim()
-      const thinkLabel = saysThinking ? arrows : `thinking${think.waited !== undefined ? ` ${think.waited}s` : ''}${arrows === '' ? '' : ` ${arrows}`}`
-      const thinkRule = thinking.length > 0
-      const thinkingRows = thinking.length + (thinkRule ? 1 : 0)
-      thinkRows = thinkingRows > 0 ? { from: 2, to: 2 + thinkingRows, columns } : undefined
+      const label = saysThinking ? arrows : `thinking${think.waited !== undefined ? ` ${think.waited}s` : ''}${arrows === '' ? '' : ` ${arrows}`}`
+      const used = think.lines.length > 0 ? think.lines.length + 1 : 0
+      thinkArea = used > 0 ? { column: at.column, row: at.row, columns, rows: used } : undefined
+      const els = used === 0 ? [] : [rule(label, 'r0', columns, mix(CLAUDE, FAINT, think.fade)), ...think.lines.map((segs, i) => line(segs, `th${i}`))]
+      return { els, rows: used, waited: think.waited }
+    }
+
+    function gitSection(columns: number, rows: number) {
+      const gv = gitView(gs, now, columns, rows, sessionRoot, prs)
+      const used = gv.lines.length > 0 ? gv.lines.length + 1 : 0
+      const els = used === 0 ? [] : [rule(gv.label, 'rg', columns, mix(CLAUDE, FAINT, gv.fade)), ...gv.lines.map((segs, i) => line(segs, `git${i}`))]
+      return { els, rows: used }
+    }
+
+    /** The code view at `at` in the pane: the edit replaying, or the file the person scrolls through. */
+    function codeSection(columns: number, rows: number, at: { column: number; row: number }) {
+      if (clip === undefined) {
+        codeArea = undefined
+        return { els: [] as RenderChildren[], rows: 0 }
+      }
+      let view: { from: number; to: number } | undefined
+      let codeSegs: Seg[][]
+      if (browse !== undefined) {
+        const shown = fileLines(clip, columns, rows, browse.top)
+        browse = { ...browse, top: shown.top }
+        view = { from: shown.from, to: shown.to }
+        codeSegs = shown.lines
+      } else {
+        const replay = codeLines(clip, now, columns, rows, codeScroll)
+        codeScroll = replay.scroll
+        codeSegs = replay.lines
+      }
+      codeArea = { column: at.column, row: at.row, columns, rows: rows + 1 }
+      const els = [
+        <Box key="code" flexDirection="column" width={columns} backgroundColor={PANE_BG}>
+          {line(codeRule(clip, columns, view), 'cr')}
+          {codeSegs.map((segs, i) => line(segs, `c${i}`))}
+        </Box>,
+      ]
+      return { els, rows: rows + 1 }
+    }
+
+    // From SPLIT_COLUMNS wide, thinking, git and the code view go beside the tree.
+    const hasThinking = thoughtView({ thought: th, typed: typed.n, now, turn: info, columns: 40, rows: 1 }).lines.length > 0
+    const hasGit = gitView(gs, now, 40, 1, sessionRoot, prs).lines.length > 0
+    const hasCode = clip !== undefined
+    if (paneColumns >= SPLIT_COLUMNS && (hasThinking || hasGit || hasCode)) {
+      const treeColumns = Math.max(30, Math.min(48, Math.floor(paneColumns * 0.4)))
+      const sideColumns = paneColumns - treeColumns - 2
+      // Thinking takes the whole column when it is alone, and shares it with git and the code view.
+      const others = (hasGit ? 1 : 0) + (hasCode ? 1 : 0)
+      const thinking = thinkingSection(sideColumns, Math.max(3, Math.floor(height / (others + 1)) - 1), { column: treeColumns + 2, row: 0 })
+      const gitPart = gitSection(sideColumns, hasCode ? gitRows(height) : Math.max(4, height - 1 - thinking.rows))
+      const codePart = codeSection(sideColumns, Math.max(3, height - 1 - thinking.rows - gitPart.rows), { column: treeColumns + 2, row: thinking.rows + gitPart.rows })
+      return (
+        <Box flexDirection="row" width={paneColumns} flexGrow={1} backgroundColor={PANE_BG}>
+          {mapView(treeColumns, saysThinking ? thinking.waited : undefined)}
+          <Box width={2} backgroundColor={PANE_BG} />
+          <Box flexDirection="column" width={sideColumns} backgroundColor={PANE_BG}>
+            {thinking.els}
+            {gitPart.els}
+            {codePart.els}
+          </Box>
+        </Box>
+      )
+    }
+
+    const thinking = thinkingSection(paneColumns, thoughtRows(height), { column: 0, row: 2 })
+    const gitPart = gitSection(paneColumns, gitRows(height))
+    const codeRows = clip === undefined ? 0 : Math.max(3, Math.min(Math.max(clip.before.length, clip.after.length) + 2, Math.floor(height * 0.45)))
+    const codePart = codeSection(paneColumns, codeRows, { column: 0, row: 0 })
+    return mapView(paneColumns, saysThinking ? thinking.waited : undefined, { els: [...thinking.els, ...gitPart.els], rows: thinking.rows + gitPart.rows }, codePart)
+
+    /** The tree with its header, status, summary card and legend; `over` goes above the tree, `under` below it. */
+    function mapView(columns: number, waited?: number, over = { els: [] as RenderChildren[], rows: 0 }, under = { els: [] as RenderChildren[], rows: 0 }) {
+      const rows = buildRows({ tree: entries, activity: act, ghosts: gh, now, columns, folders })
       const summary = summaryLines(info, now, columns - 4)
       const legend = legendLines(columns)
-      const chrome = 3 + 1 + legend.length + 1 + (summary.length > 0 ? summary.length + 2 : 0) + underRows + thinkingRows
+      const chrome = 3 + 1 + legend.length + 1 + (summary.length > 0 ? summary.length + 2 : 0) + over.rows + under.rows
       const room = Math.max(3, height - chrome)
       const focus = focusOf(act)
       scroll = scrollTo(scroll, rows, focus, room)
@@ -629,9 +727,9 @@ export const register: Register = on => {
       const above = scroll
       const below = Math.max(0, rows.length - scroll - room)
       const fileCount = entries.filter(t => !t.d).length
-      // Under the tree, the code view starts below the header, the tree and the card.
-      if (under !== undefined && codeArea !== undefined) {
-        codeArea = { ...codeArea, row: 3 + thinkingRows + visible.length + (below > 0 ? 1 : 0) + (summary.length > 0 ? summary.length + 2 : 0) }
+      // Under the tree, the code view starts below the header, the sections above the tree, the tree and the card.
+      if (under.rows > 0 && codeArea !== undefined) {
+        codeArea = { ...codeArea, row: 3 + over.rows + visible.length + (below > 0 ? 1 : 0) + (summary.length > 0 ? summary.length + 2 : 0) }
       }
       const age = now - info.at
       const card = Math.min(smoothIn(age / 500), info.phase === 'complete' && age > T.summary - 1500 ? Math.max(0, (T.summary - age) / 1500) : 1)
@@ -639,10 +737,9 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" width={columns} flexGrow={1} backgroundColor={PANE_BG}>
           {line(headerLine(now, focus !== undefined || info.phase === 'working', root, remoteOf(act, now)), 'h')}
-          {line(statusLine(act, info, now, fileCount, columns, { waited: saysThinking ? think.waited : undefined, writing }), 's')}
-          {thinkRule && rule(thinkLabel, 'r0', mix(CLAUDE, FAINT, think.fade))}
-          {thinking.map((segs, i) => line(segs, `th${i}`))}
-          {rule(above > 0 ? `tree ↑${above}` : 'tree', 'r1')}
+          {line(statusLine(act, info, now, fileCount, columns, { waited, git: gitDoingOf(gs, now), writing }), 's')}
+          {over.els}
+          {rule(above > 0 ? `tree ↑${above}` : 'tree', 'r1', columns)}
           {rows.length === 0 ? line([{ t: ' scanning…', c: MUTED }], 'empty') : visible.map(r => line(r.segs, r.key))}
           {below > 0 && line([{ t: `   ↓ ${below} more`, c: FAINT }], 'down')}
           {summary.length > 0 && (
@@ -650,9 +747,9 @@ export const register: Register = on => {
               {summary.map((segs, i) => line(segs, `sum${i}`))}
             </Box>
           )}
-          {under}
+          {under.els}
           <Box flexGrow={1} backgroundColor={PANE_BG} />
-          {rule('legend', 'r2')}
+          {rule('legend', 'r2', columns)}
           {legend.map((segs, i) => line(segs, `leg${i}`))}
         </Box>
       )
@@ -679,4 +776,34 @@ function merge(segs: readonly Seg[]): Seg[] {
     } else out.push(s)
   }
   return out
+}
+
+/** Rows the git view gets: a share of the pane's height, within limits. */
+const gitRows = (height: number) => Math.max(4, Math.min(12, Math.floor(height * 0.3)))
+
+/** Reads the branch graph and how far HEAD is from its upstream; undefined outside a repository. */
+async function readGit($: EngineInterface, cwd: string, refs: readonly string[]): Promise<GitRead | undefined> {
+  const run = (argv: readonly string[]) => $.process.run(argv, { cwd, timeoutMs: 5000 }).catch(() => undefined)
+  let log = await run(graphArgv(refs))
+  // A branch named earlier may be gone: draw HEAD alone then.
+  if (log?.exitCode !== 0 && refs.length > 0) log = await run(graphArgv([]))
+  if (log === undefined || log.exitCode !== 0) return undefined
+  const counts = await run(AHEAD_ARGV)
+  const [ahead, behind] = counts?.exitCode === 0 ? counts.stdout.trim().split(/\s+/).map(Number) : []
+  return { rows: parseGraph(log.stdout), ahead, behind }
+}
+
+/** Opens or merges the PR card when a `gh pr` command printed a PR's URL. */
+function withPr(state: GitState, actions: readonly GitAction[], command: string, stdout: string, now: number): GitState {
+  const n = prNumberOf(stdout)
+  if (actions.some(a => a.kind === 'pr') && n !== undefined) {
+    const base = prBaseOf(command)
+    return { ...state, pr: { number: n, head: state.head, ...(base === undefined ? {} : { base }), state: 'open', at: now } }
+  }
+  const merged = actions.find(a => a.kind === 'pr-merge')
+  if (merged === undefined) return state
+  const number = merged.ref !== undefined ? Number(merged.ref) : n ?? state.pr?.number
+  if (number === undefined) return state
+  const head = state.pr?.number === number ? state.pr.head : state.head
+  return { ...state, pr: { number, head, ...(state.pr?.base === undefined ? {} : { base: state.pr.base }), state: 'merged', at: now } }
 }
