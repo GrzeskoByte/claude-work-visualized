@@ -1,13 +1,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Activity, Clip, Ghost, Op, TreeEntry, TurnInfo } from '../types'
+import type { Activity, Clip, Ghost, Op, Thought, TreeEntry, TurnInfo } from '../types'
 import { HOLD, MAX_BYTES, browseAfter, clipKey, clipOf, codeLines, codeRule, currentClip, enqueue, fileLines, isClipDone, patchStats } from './code'
 import type { Browse, CodeArea } from './code'
 import {
-  COLOR, FAINT, ICON, IGNORED, LABEL, MUTED, T,
-  buildRows, classifyBash, counted, mentionsOf, diffTrees, emptyTurn, focusOf, headerLine, isAnimating, isUnscanned, legendLines, mix, remoteOf,
-  placeOf, relPath, remotePath, scrollTo, staleKeys, statusLine, summaryLines, withPath, withoutPath,
+  CLAUDE, COLOR, FAINT, ICON, IGNORED, LABEL, MUTED, T,
+  buildRows, classifyBash, counted, mentionsOf, diffTrees, emptyTurn, focusOf, headerLine, heldFocusOf, isAnimating, isUnscanned, legendLines, mix, remoteOf,
+  placeOf, relPath, remotePath, scrollTo, staleKeys, statusLine, summaryLines, thoughtRows, thoughtView, turnOf, typeTo, withPath, withThought,
+  withoutPath,
 } from './model'
 import type { FolderMemory, Seg, Target } from './model'
 
@@ -23,6 +24,8 @@ const MAX_REPLAYS = 4 // files of one tool call the code view checks and replays
 /** How an edit's result shows in the chat: one line while the pane replays it, or the full diff. */
 type ChatDiffs = 'quiet' | 'full'
 const PANE_BG = '#000000'
+const WHEEL_LINES = 2 // lines one wheel or touchpad tick moves the thought
+const BROWSE_HOLD = 20_000 // a scrolled thought stays put this long without scrolling
 
 const tree = atom({ plugin: 'work-visualized', key: 'tree' } as const, [] as TreeEntry[])
 const activity = atom({ plugin: 'work-visualized', key: 'activity' } as const, {} as Record<string, Activity>)
@@ -30,6 +33,7 @@ const ghosts = atom({ plugin: 'work-visualized', key: 'ghosts' } as const, {} as
 const turn = atom({ plugin: 'work-visualized', key: 'turn' } as const, emptyTurn())
 const watching = atom({ plugin: 'work-visualized', key: 'watching' } as const, true)
 const clips = atom({ plugin: 'work-visualized', key: 'clips' } as const, [] as Clip[])
+const thought = atom({ plugin: 'work-visualized', key: 'thought' } as const, null as Thought | null)
 
 // Drawing memory only: a reload starts these over, harmlessly.
 const folders: FolderMemory = new Map()
@@ -38,6 +42,11 @@ let codeScroll = 0
 let browse: Browse | undefined // the person scrolling through the edited file
 let codeArea: CodeArea | undefined // where the code view was drawn last frame
 let shownClip: Clip | undefined
+let typed = { key: '', n: 0, at: 0 } // how far the typewriter has got through the thought
+let thinkBrowse: { key: string; top: number; at: number } | undefined // the person scrolling back through the thought
+let thinkRows: { from: number; to: number; columns: number } | undefined // pane rows the thinking section was drawn on last frame
+let thinkTop = 0 // the thought's first line shown last frame
+let writing: { tool: string; bytes: number; at: number } | undefined // a tool call the model is still writing
 let animateUntil = 0
 let isWatching = true // mirrors the watching atom for synchronous checks
 let chatDiffs: ChatDiffs = 'quiet'
@@ -255,7 +264,7 @@ export const register: Register = on => {
         const c = await read($, clips)
         const isKept = (x: Clip) => !isClipDone(x, t) || isBrowsed(x, t)
         if (c.some(x => !isKept(x))) await update($, clips, list => list.filter(isKept))
-        if (!isAnimating(a, g, await read($, turn), t) && t > animateUntil - T.trail) animateUntil = Math.min(animateUntil, t + 1500)
+        if (!isAnimating(a, g, await read($, turn), t, await read($, thought)) && t > animateUntil - T.trail) animateUntil = Math.min(animateUntil, t + 1500)
       })()
     })
 
@@ -351,7 +360,60 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Thinking streams in pieces; the pane types each thought out as it arrives.
+  on('turn.step', async function* ($, e, next) {
+    if (e.agentId !== undefined || !isWatching) return yield* next(e)
+    const begun = await $.clock.now()
+    await update($, thought, t => ({ ...(t ?? { key: '', text: '', dropped: 0, at: begun, endedAt: begun }), waitingSince: begun }))
+    startAnimating(begun)
+    const stream = next(e)
+    let isOpen = false
+    let isSettled = false
+    // The response has moved past thinking: stop waiting, and end the thought if this step had one.
+    const settle = async () => {
+      if (isSettled) return
+      isSettled = true
+      const now = await $.clock.now()
+      await update($, thought, t => {
+        if (t === null) return t
+        const { waitingSince: _, ...rest } = t
+        return isOpen && rest.endedAt === undefined ? { ...rest, endedAt: now } : rest
+      })
+    }
+    try {
+      for (let step = await stream.next(); ; step = await stream.next()) {
+        if (step.done === true) return step.value
+        const chunk = step.value
+        if (chunk.kind === 'tool') {
+          writing = { tool: chunk.name, bytes: 0, at: await $.clock.now() }
+          startAnimating(writing.at)
+        } else if (chunk.kind === 'input' && writing !== undefined) {
+          writing = { ...writing, bytes: writing.bytes + chunk.json.length }
+        } else if (chunk.kind === 'stop') {
+          writing = undefined
+        }
+        if (chunk.kind === 'thinking' && !isSettled) {
+          const key = `${e.turnId}:${e.index}:${chunk.index}`
+          isOpen = true
+          const now = await $.clock.now()
+          await update($, thought, t => {
+            const fresh = withThought(t, key, chunk.text, now)
+            return fresh.text === '' && t?.waitingSince !== undefined ? { ...fresh, waitingSince: t.waitingSince } : fresh
+          })
+          startAnimating(now)
+        } else if (chunk.kind !== 'engine' && chunk.kind !== 'thinking') {
+          await settle()
+        }
+        yield chunk
+      }
+    } finally {
+      writing = undefined
+      await settle()
+    }
+  })
+
   on('tool.call', async ($, e, next) => {
+    writing = undefined
     const tool = String(e.tool)
     const mutates = tool === 'Bash' || tool === 'Write' || tool === 'Edit' || tool === 'MultiEdit' || tool === 'NotebookEdit'
     const cwd = await $.session.cwd()
@@ -440,8 +502,17 @@ export const register: Register = on => {
     return ran
   })
 
-  // The wheel, a touchpad or the scroll keys over the code view move through the edited file.
+  // The wheel over the thinking section scrolls back through the thought; the wheel, a touchpad or
+  // the scroll keys over the code view move through the edited file.
   on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    const th = await read($, thought)
+    const pointer = e.pointer
+    if (th !== null && thinkRows !== undefined && pointer !== undefined && pointer.row >= thinkRows.from && pointer.row < thinkRows.to && pointer.column < thinkRows.columns) {
+      const from = thinkBrowse !== undefined && turnOf(thinkBrowse.key) === turnOf(th.key) ? thinkBrowse.top : thinkTop
+      thinkBrowse = { key: th.key, top: Math.max(0, from + e.by * WHEEL_LINES), at: await $.clock.now() }
+      $.ui.invalidate('ui.render')
+      return {}
+    }
     const moved = browseAfter(browse, shownClip, codeArea, e, await $.clock.now())
     if (moved === undefined) return next(e)
     browse = moved
@@ -456,6 +527,7 @@ export const register: Register = on => {
     const act = await read($, activity)
     const gh = await read($, ghosts)
     const info = await read($, turn)
+    const th = await read($, thought)
     const root = (await $.session.cwd()).replace(/\/+$/, '').split('/').pop() ?? ''
     const paneColumns = Math.max(24, (e.props.bodyColumns ?? 40) - 1)
     const height = Math.max(8, e.props.scroll?.bodyRows ?? (e.viewport?.rows ?? 30) - 3)
@@ -517,14 +589,39 @@ export const register: Register = on => {
 
     /** The tree with its header, status, summary card and legend; `under` goes below the tree. */
     function mapView(columns: number, under?: RenderChildren, underRows = 0) {
-      // `── label ─────`, a section rule.
+      // `── label ─────`, a section rule; a plain rule when the label is empty.
       const rule = (label: string, key: string, c = FAINT) =>
-        line([{ t: '── ', c: FAINT }, { t: label, c, b: true }, { t: ' ' + '─'.repeat(Math.max(0, columns - label.length - 4)), c: FAINT }], key)
+        line(
+          label === ''
+            ? [{ t: '─'.repeat(columns), c: FAINT }]
+            : [{ t: '── ', c: FAINT }, { t: label, c, b: true }, { t: ' ' + '─'.repeat(Math.max(0, columns - label.length - 4)), c: FAINT }],
+          key,
+        )
 
       const rows = buildRows({ tree: entries, activity: act, ghosts: gh, now, columns, folders })
+      if (th !== null) {
+        // A new block in the same turn types on from where the last left off; a new turn starts over.
+        if (turnOf(th.key) !== turnOf(typed.key)) typed = { key: th.key, n: th.dropped, at: now }
+        const pace = th.endedAt === undefined ? 'reading' : 'late'
+        typed = { key: th.key, n: typeTo(typed.n, th.dropped + th.text.length, Math.min(250, now - typed.at), pace), at: now }
+      }
+      if (thinkBrowse !== undefined && (th === null || turnOf(thinkBrowse.key) !== turnOf(th.key) || now - thinkBrowse.at > BROWSE_HOLD)) thinkBrowse = undefined
+      const think = thoughtView({ thought: th, typed: typed.n, now, turn: info, columns, rows: thoughtRows(height), top: thinkBrowse?.top })
+      const thinking = think.lines
+      thinkTop = think.top
+      // Scrolled back down to the end: follow the typing again.
+      if (thinkBrowse !== undefined && think.below === 0) thinkBrowse = undefined
+      else if (thinkBrowse !== undefined) thinkBrowse = { ...thinkBrowse, top: think.top }
+      // The prompt line already says thinking while Claude thinks: the section then needs no title.
+      const saysThinking = heldFocusOf(act, now) === undefined && writing === undefined && info.phase === 'working'
+      const arrows = `${think.above > 0 ? ` ↑${think.above}` : ''}${think.below > 0 ? ` ↓${think.below}` : ''}`.trim()
+      const thinkLabel = saysThinking ? arrows : `thinking${think.waited !== undefined ? ` ${think.waited}s` : ''}${arrows === '' ? '' : ` ${arrows}`}`
+      const thinkRule = thinking.length > 0
+      const thinkingRows = thinking.length + (thinkRule ? 1 : 0)
+      thinkRows = thinkingRows > 0 ? { from: 2, to: 2 + thinkingRows, columns } : undefined
       const summary = summaryLines(info, now, columns - 4)
       const legend = legendLines(columns)
-      const chrome = 3 + 1 + legend.length + 1 + (summary.length > 0 ? summary.length + 2 : 0) + underRows
+      const chrome = 3 + 1 + legend.length + 1 + (summary.length > 0 ? summary.length + 2 : 0) + underRows + thinkingRows
       const room = Math.max(3, height - chrome)
       const focus = focusOf(act)
       scroll = scrollTo(scroll, rows, focus, room)
@@ -534,7 +631,7 @@ export const register: Register = on => {
       const fileCount = entries.filter(t => !t.d).length
       // Under the tree, the code view starts below the header, the tree and the card.
       if (under !== undefined && codeArea !== undefined) {
-        codeArea = { ...codeArea, row: 3 + visible.length + (below > 0 ? 1 : 0) + (summary.length > 0 ? summary.length + 2 : 0) }
+        codeArea = { ...codeArea, row: 3 + thinkingRows + visible.length + (below > 0 ? 1 : 0) + (summary.length > 0 ? summary.length + 2 : 0) }
       }
       const age = now - info.at
       const card = Math.min(smoothIn(age / 500), info.phase === 'complete' && age > T.summary - 1500 ? Math.max(0, (T.summary - age) / 1500) : 1)
@@ -542,7 +639,9 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" width={columns} flexGrow={1} backgroundColor={PANE_BG}>
           {line(headerLine(now, focus !== undefined || info.phase === 'working', root, remoteOf(act, now)), 'h')}
-          {line(statusLine(act, info, now, fileCount, columns), 's')}
+          {line(statusLine(act, info, now, fileCount, columns, { waited: saysThinking ? think.waited : undefined, writing }), 's')}
+          {thinkRule && rule(thinkLabel, 'r0', mix(CLAUDE, FAINT, think.fade))}
+          {thinking.map((segs, i) => line(segs, `th${i}`))}
           {rule(above > 0 ? `tree ↑${above}` : 'tree', 'r1')}
           {rows.length === 0 ? line([{ t: ' scanning…', c: MUTED }], 'empty') : visible.map(r => line(r.segs, r.key))}
           {below > 0 && line([{ t: `   ↓ ${below} more`, c: FAINT }], 'down')}

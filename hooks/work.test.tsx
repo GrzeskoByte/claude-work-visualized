@@ -1,6 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { buildRows, classifyBash, diffTrees, emptyTurn, focusOf, mentionsOf, placeOf, relPath, remotePath, statusLine, summaryLines, T } from './model'
+import {
+  buildRows, classifyBash, diffTrees, emptyTurn, focusOf, mentionsOf, placeOf, relPath, remotePath, statusLine, summaryLines, T, thoughtRows,
+  thoughtView, typeTo, withThought, wrapWords,
+} from './model'
 import type { FolderMemory } from './model'
 
 // The test environment has it; the engine's typings leave it out.
@@ -351,4 +354,247 @@ test('a changelog rewritten by a python heredoc replays in the code view', async
   expect(shown).toContain('~:/site/CHANGELOG.md:1')
   expect(shown).toContain('CHANGELOG.md')
   await ui.unmount()
+})
+
+test('thinking is kept as one line, a new block in the turn going on after an empty line, a new turn starting over', async () => {
+  const a = withThought(null, 't1:0:0', '  Let me\n\nlook', 0)
+  expect(a.text).toBe('Let me look')
+  const b = withThought(a, 't1:0:0', ' at  this.', 10)
+  expect(b.text).toBe('Let me look at this.')
+  const c = withThought(b, 't1:1:0', 'Next.', 20)
+  expect(c).toEqual({ key: 't1:1:0', text: 'Let me look at this.\n\nNext.', dropped: 0, at: 20 })
+  expect(wrapWords(c.text, 40)).toEqual(['Let me look at this.', '', 'Next.'])
+  expect(withThought(c, 't2:0:0', 'Fresh.', 30)).toEqual({ key: 't2:0:0', text: 'Fresh.', dropped: 0, at: 30 })
+})
+
+test('the typewriter keeps a reading pace and speeds up only when far behind', async () => {
+  expect(typeTo(0, 100, 1000)).toBe(35)
+  expect(typeTo(0, 4000, 1000)).toBeGreaterThan(300)
+  expect(typeTo(5, 5, 33)).toBe(5)
+  expect(typeTo(0, 300, 1000, 'late')).toBe(105)
+})
+
+test('thinking wraps, shows a share of the pane, scrolls, and fades a while after the turn', async () => {
+  expect(wrapWords('one two three', 7)).toEqual(['one two', 'three'])
+  expect(wrapWords('abcdefghij', 4)).toEqual(['abcd', 'efgh', 'ij'])
+  expect(thoughtRows(10)).toBe(4)
+  expect(thoughtRows(30)).toBe(9)
+  expect(thoughtRows(100)).toBe(12)
+  const working = { ...emptyTurn(), phase: 'working' as const }
+  const long = withThought(null, 'k', 'word '.repeat(60), 0)
+  const view = (top?: number) => thoughtView({ thought: long, typed: 10_000, now: 100, turn: working, columns: 30, rows: 4, top })
+  expect(view().lines.length).toBe(4)
+  expect(view().below).toBe(0)
+  expect(view().above).toBeGreaterThan(0)
+  for (const l of view().lines) expect(text(l).length).toBeLessThanOrEqual(30)
+  expect(text(view().lines[2] ?? [])).toContain('▏')
+  expect(view().lines[3]).toEqual([])
+  expect(view(0).above).toBe(0)
+  expect(view(0).below).toBeGreaterThan(0)
+  expect(view(999).below).toBe(0)
+  const half = thoughtView({ thought: withThought(null, 'k', 'Reading the config', 0), typed: 7, now: 100, turn: working, columns: 40, rows: 4 })
+  expect(text(half.lines.flat())).toBe(' Reading▏')
+  const done = { ...withThought(null, 'k', 'Done.', 0), endedAt: 1000 }
+  const ended: ReturnType<typeof emptyTurn> = { ...emptyTurn(), phase: 'complete', at: 2000 }
+  const at = (now: number, turn = ended) => thoughtView({ thought: done, typed: 5, now, turn, columns: 40, rows: 4 }).lines
+  expect(text(at(2000).flat())).toBe(' Done.')
+  expect(at(60_000, working).length).toBe(2)
+  expect(at(2000 + T.thoughtLinger - 1).length).toBe(2)
+  expect(at(2000 + T.thoughtLinger + T.thoughtFade + 1)).toEqual([])
+  expect(at(2000 + T.thoughtLinger + T.thoughtFade + 1).length).toBe(0)
+  const waiting = { ...done, waitingSince: 0 }
+  // The dots go under the thoughts so far, which stay readable while the next one is awaited.
+  const held = thoughtView({ thought: waiting, typed: 5, now: 4200, turn: working, columns: 40, rows: 4 })
+  expect(held.lines.map(l => text(l))).toEqual([' Done.', '', ' • • • • •'])
+  expect(held.waited).toBe(4)
+  const fresh = thoughtView({ thought: { ...waiting, text: '' }, typed: 0, now: 4200, turn: working, columns: 40, rows: 4 })
+  expect(text(fresh.lines.flat())).toBe(' • • • • •')
+  expect(thoughtView({ thought: withThought(null, 'k', '', 0), typed: 0, now: 100, turn: working, columns: 40, rows: 4 }).lines).toEqual([])
+})
+
+test('thinking streamed in a step types itself into the pane', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  mock.store(on)
+  on('session.cwd', () => ({ value: ROOT }))
+  on('session.start', () => ({ cwd: ROOT }))
+  on('command.register', () => ({ value: undefined }) as never)
+  on('fs.list', () => ({ value: [] }))
+  on('ui.open', () => ({ value: {} }) as never)
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('turn.step', async function* () {
+    yield { kind: 'thinking', index: 0, text: 'Checking how the\nconfig is loaded' }
+    yield { kind: 'text', index: 1, text: 'Done.' }
+    return { turnId: 't1', index: 0, answer: 'Done.', toolUses: [], stopReason: 'end_turn', usage: null } as never
+  })
+  await $.session.start({ source: 'startup', cwd: ROOT } as never)
+
+  const stream = $.turn.step({ turnId: 't1', index: 0, model: 'm', messageCount: 1 })
+  const chunks: unknown[] = []
+  let step = await stream.next()
+  for (; step.done !== true; step = await stream.next()) chunks.push(step.value)
+  expect(chunks.length).toBe(2)
+  expect(step.value.answer).toBe('Done.')
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({
+      plugin: 'work-visualized',
+      surface,
+      component: 'Pane',
+      requestId: 'work-map',
+      props: { title: 'Claude Work', isFocused: false, bodyColumns: 44, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+    })
+    await clock.advance(2000)
+    await ui.unmount()
+    const again = await $.ui.mount({
+      plugin: 'work-visualized',
+      surface,
+      component: 'Pane',
+      requestId: 'work-map',
+      props: { title: 'Claude Work', isFocused: false, bodyColumns: 44, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+    })
+    const shown = (await again.findAll({ type: 'Text' })).map(x => x.text).join('')
+    expect(shown).toContain('thinking')
+    expect(shown).toContain('Checking how the config is loaded')
+    await again.unmount()
+  }
+})
+
+test('the wheel over the thinking section scrolls back through the thought', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  mock.store(on)
+  on('session.cwd', () => ({ value: ROOT }))
+  on('session.start', () => ({ cwd: ROOT }))
+  on('command.register', () => ({ value: undefined }) as never)
+  on('fs.list', () => ({ value: [] }))
+  on('ui.open', () => ({ value: {} }) as never)
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('turn.step', async function* () {
+    yield { kind: 'thinking', index: 0, text: 'First idea. ' + 'more '.repeat(150) }
+    return { turnId: 't1', index: 0, answer: '', toolUses: [], stopReason: 'end_turn', usage: null } as never
+  })
+  await $.session.start({ source: 'startup', cwd: ROOT } as never)
+  await $.turn.start({ turnId: 't1', source: 'prompt' } as never).catch(() => undefined)
+  const stream = $.turn.step({ turnId: 't1', index: 0, model: 'm', messageCount: 1 })
+  for (let step = await stream.next(); step.done !== true; step = await stream.next()) {}
+
+  const mount = () => $.ui.mount({
+    plugin: 'work-visualized',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'work-map',
+    props: { title: 'Claude Work', isFocused: false, bodyColumns: 44, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  })
+  const shownBy = async (ui: Awaited<ReturnType<typeof mount>>) => (await ui.findAll({ type: 'Text' })).map(x => x.text).join('')
+  const ui = await mount()
+  await clock.advance(30_000)
+  await ui.unmount()
+  const typed = await mount()
+  expect(await shownBy(typed)).toContain('── ↑')
+  expect(await shownBy(typed)).not.toContain('First idea.')
+  await typed.unmount()
+
+  await $.ui.scroll({ component: 'Pane', requestId: 'work-map', by: -50, offset: 0, bodyRows: 30, contentRows: 30, origin: { kind: 'person' }, pointer: { column: 5, row: 4 } } as never)
+  const back = await mount()
+  expect(await shownBy(back)).toContain('First idea.')
+  expect(await shownBy(back)).toContain('↓')
+  await back.unmount()
+})
+
+test('a wave of dots holds the place until the thinking text comes, and a step without thinking keeps the last thought', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  mock.store(on)
+  on('session.cwd', () => ({ value: ROOT }))
+  on('session.start', () => ({ cwd: ROOT }))
+  on('command.register', () => ({ value: undefined }) as never)
+  on('fs.list', () => ({ value: [] }))
+  on('ui.open', () => ({ value: {} }) as never)
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('turn.step', async function* (_$, e) {
+    if (e.index === 0) {
+      await clock.sleep(3000)
+      yield { kind: 'thinking', index: 0, text: 'Late summary.' }
+    }
+    yield { kind: 'text', index: 1, text: 'Done.' }
+    return { turnId: 't1', index: e.index, answer: 'Done.', toolUses: [], stopReason: 'end_turn', usage: null } as never
+  })
+  await $.session.start({ source: 'startup', cwd: ROOT } as never)
+  // The pane types only while it is drawn, so it stays mounted while the clock moves.
+  const shown = async (ms = 0) => {
+    const mount = () => $.ui.mount({
+      plugin: 'work-visualized',
+      surface: 'terminal',
+      component: 'Pane',
+      requestId: 'work-map',
+      props: { title: 'Claude Work', isFocused: false, bodyColumns: 44, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+    })
+    const ui = await mount()
+    await clock.advance(ms)
+    await ui.unmount()
+    const again = await mount()
+    const out = (await again.findAll({ type: 'Text' })).map(x => x.text).join('')
+    await again.unmount()
+    return out
+  }
+  const drain = async (s: ReturnType<typeof $.turn.step>) => {
+    for (let step = await s.next(); step.done !== true; step = await s.next()) {}
+  }
+
+  const first = $.turn.step({ turnId: 't1', index: 0, model: 'm', messageCount: 1 })
+  const done = drain(first)
+  const waiting = await shown(1500)
+  expect(waiting).toContain('thinking 1s')
+  expect(waiting.split('thinking').length - 1).toBe(1)
+  await clock.advance(2000)
+  await done
+  expect(await shown(5000)).toContain('Late summary.')
+
+  await drain($.turn.step({ turnId: 't1', index: 1, model: 'm', messageCount: 2 }))
+  const after = await shown()
+  expect(after).toContain('Late summary.')
+  expect(after).not.toContain('• • •')
+})
+
+test('the prompt line holds a finished call a moment, then names a tool call being written', async () => {
+  const working = { ...emptyTurn(), phase: 'working' as const }
+  const done = { 'src/a.ts': { op: 'view' as const, startedAt: 0, endedAt: 1000, running: 0 } }
+  expect(text(statusLine(done, working, 2000, 1, 60))).toContain('reading src/a.ts 1.0s')
+  expect(text(statusLine(done, working, 4000, 1, 60))).toContain('thinking')
+  const writing = { tool: 'mcp__claude_ai_Obsidian__edit-note', bytes: 12_400, at: 0 }
+  expect(text(statusLine({}, working, 4000, 1, 60, { writing }))).toContain('writing Obsidian edit-note 12 kB 4.0s')
+})
+
+test('a tool call still being written shows on the prompt line', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  mock.store(on)
+  on('session.cwd', () => ({ value: ROOT }))
+  on('session.start', () => ({ cwd: ROOT }))
+  on('fs.list', () => ({ value: [] }))
+  on('ui.open', () => ({ value: {} }) as never)
+  on('ui.status', () => ({ value: undefined }) as never)
+  let finish = () => {}
+  const held = new Promise<void>(r => (finish = r))
+  on('turn.step', async function* () {
+    yield { kind: 'tool', index: 0, id: 't', name: 'mcp__claude_ai_Obsidian__edit-note' }
+    yield { kind: 'input', index: 0, json: 'x'.repeat(2500) }
+    await held
+    return { turnId: 't1', index: 0, answer: '', toolUses: [], stopReason: 'tool_use', usage: null } as never
+  })
+  await $.session.start({ source: 'startup', cwd: ROOT } as never)
+  await $.turn.start({ turnId: 't1', source: 'prompt' } as never).catch(() => undefined)
+  const stream = $.turn.step({ turnId: 't1', index: 0, model: 'm', messageCount: 1 })
+  const draining = (async () => {
+    for (let step = await stream.next(); step.done !== true; step = await stream.next()) {}
+  })()
+  await clock.advance(1000)
+  const ui = await $.ui.mount({
+    plugin: 'work-visualized',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'work-map',
+    props: { title: 'Claude Work', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  })
+  expect((await ui.findAll({ type: 'Text' })).map(x => x.text).join('')).toContain('writing Obsidian edit-note 2.5 kB')
+  await ui.unmount()
+  finish()
+  await draining
 })

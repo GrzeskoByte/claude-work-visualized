@@ -31,6 +31,10 @@ deletes it, so you can see at a glance where Claude is working right now.
   backspaced and retyped in place, and gutter marks stay for a while after. Long lines wrap, the
   view scrolls smoothly to the caret, and code is highlighted per language (about 60, through
   Prism) in Tokyo Night colours.
+- **Live thinking:** Claude's thinking types itself out under the prompt line at a pace you can
+  read (a wave of dots and a seconds count hold its place until the words arrive), with a blinking cursor, in up to 12 lines. Scroll over it to read back. It stays until 20 s
+  after the turn ends. Needs `"showThinkingSummaries": true` in
+  `~/.claude/settings.json`: without it Claude Code receives thinking with no text.
 - **Completion card:** when a turn ends, a card shows how many files were viewed, edited, created
   and deleted, as filling bars.
 - **Terminal style:** only one-cell glyphs and box-drawing characters, up to 30 fps while anything

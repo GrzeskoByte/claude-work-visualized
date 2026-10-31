@@ -10,6 +10,7 @@ values.
  every 1.5 s ─────────────────────────────────────────────────────────────────► rescan() + diff
  every 33 ms ──► $.ui.invalidate('ui.render') ──► buildRows(scene at now) ──► Pane
  turn.start / turn.complete ──► turn (phase + counts) ──► completion card
+ turn.step (thinking chunks) ──► thought (text so far) ──► typewriter in the pane
 ```
 
 ## State
@@ -23,10 +24,11 @@ hot reload:
 | `activity` | Per path: `{ op, startedAt, endedAt?, running }`, i.e. the last operation and how many tool calls are still running on it |
 | `ghosts` | Deleted paths kept on screen while their exit animation plays |
 | `turn` | `idle`, `working` or `complete`, plus the paths counted per operation this turn |
+| `thought` | The turn's thinking so far, one paragraph per block, whitespace collapsed (the last 24,000 characters), the key of the block streaming now, when its last piece arrived, and when it ended |
 | `watching` | Whether `/watch` is on (also kept in `$.store`, so it lasts across sessions) |
 | `clips` | Edits queued or shown in the code view: a window of the file before and after |
 
-Drawing-only memory (which folders are open, the scroll position) is kept in module variables.
+Drawing-only memory (which folders are open, the scroll position, how far the typewriter has got) is kept in module variables.
 Losing it on a reload is harmless.
 
 ## From tool call to animation
@@ -123,6 +125,20 @@ A clip also keeps the whole file after the edit (`file`) and the lines it change
 `browseAfter()` moves a top line through the file (2 lines a tick, 1 a key) and `fileLines()`
 draws from there. A scroll over the tree goes on to the engine. Claude's next edit, or 20 s
 without scrolling, returns the view to following the replay.
+
+## Thinking
+
+The `turn.step` hook reads the model's response as it streams and passes every chunk on
+unchanged. Each `thinking` chunk of the main loop (not subagents) is appended to `thought` by
+`withThought()`, keyed by turn, step and block: a new block in the same turn is added as a new
+paragraph under the earlier ones, and a new turn starts the thought over. The first
+chunk of any other kind (text, a tool call, the stop) marks the thought ended. Nothing is read
+while watching is off.
+
+The pane does the typing: each frame, `typeTo()` moves the typewriter on from where the last frame
+left it, and `thoughtView()` word-wraps what's typed so far and shows the last `thoughtRows()` lines.
+A `ui.scroll` hook takes a wheel over the section and moves the first line shown, until a new
+thought, 20 s without scrolling, or a scroll back to the end. Other scrolls go on to the engine.
 
 ## Scanning and diffing
 

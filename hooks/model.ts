@@ -2,7 +2,7 @@
 // turning the tree plus Claude's activity into styled rows for a given instant.
 // Nothing here touches `$`, so tests drive it with plain values.
 
-import type { Activity, Ghost, Op, TreeEntry, TurnInfo } from '../types'
+import type { Activity, Ghost, Op, Thought, TreeEntry, TurnInfo } from '../types'
 
 export const OPS: readonly Op[] = ['view', 'edit', 'create', 'delete']
 
@@ -54,6 +54,8 @@ export const T = {
   expand: 450,
   collapse: 500,
   summary: 20_000,
+  thoughtLinger: 20_000, // a finished thought stays this long after the turn ends
+  thoughtFade: 1500,
 }
 
 export const IGNORED = new Set([
@@ -556,13 +558,32 @@ export function focusOf(activity: Readonly<Record<string, Activity>>): string | 
   return best
 }
 
+export const HOLD_LINE = 2500 // a finished operation keeps the prompt line this long, so it doesn't flash "thinking" between calls
+
+/** The file the prompt line names: the running operation, or one that ended a moment ago. */
+export function heldFocusOf(activity: Readonly<Record<string, Activity>>, now: number): string | undefined {
+  const running = focusOf(activity)
+  if (running !== undefined) return running
+  let best: string | undefined
+  let at = now - HOLD_LINE
+  for (const [path, a] of Object.entries(activity)) {
+    if (a.endedAt !== undefined && a.endedAt >= at) {
+      best = path
+      at = a.endedAt
+    }
+  }
+  return best
+}
+
 export function isAnimating(
   activity: Readonly<Record<string, Activity>>,
   ghosts: Readonly<Record<string, Ghost>>,
   turn: TurnInfo,
   now: number,
+  thought: Thought | null = null,
 ): boolean {
   if (Object.keys(ghosts).length > 0) return true
+  if (thought !== null && (thought.endedAt === undefined || thought.waitingSince !== undefined || turn.phase === 'working' || now - Math.max(thought.endedAt, turn.at) < T.thoughtLinger + T.thoughtFade + 2000)) return true
   if (turn.phase === 'complete' && now - turn.at < T.summary + 1000) return true
   return Object.values(activity).some(a => levelOf(a, now) !== 'none')
 }
@@ -922,9 +943,39 @@ export function remoteOf(activity: Readonly<Record<string, Activity>>, now: numb
   return best
 }
 
-/** The prompt line: what Claude is doing right now, with a live cursor. */
-export function statusLine(activity: Readonly<Record<string, Activity>>, turn: TurnInfo, now: number, fileCount: number, columns: number): Seg[] {
-  const focus = focusOf(activity)
+/** A tool name as the prompt line shows it: `mcp__claude_ai_Obsidian__edit-note` is `Obsidian edit-note`. */
+export function toolName(tool: string): string {
+  return tool.replace(/^mcp__/, '').replace(/^claude_ai_/, '').replace(/__/g, ' ')
+}
+
+const SIZE_UNITS = ['B', 'kB', 'MB', 'GB', 'TB']
+
+function sizeText(bytes: number): string {
+  let n = bytes
+  let unit = 0
+  while (n >= 1000 && unit < SIZE_UNITS.length - 1) {
+    n /= 1000
+    unit++
+  }
+  return `${unit > 0 && n < 10 ? n.toFixed(1) : Math.round(n)} ${SIZE_UNITS[unit]}`
+}
+
+/** The prompt line: what Claude is doing right now, with a live cursor; `waited` counts a thought's wait. */
+export function statusLine(
+  activity: Readonly<Record<string, Activity>>,
+  turn: TurnInfo,
+  now: number,
+  fileCount: number,
+  columns: number,
+  extra: {
+    waited?: number
+    /** A tool call the model is still writing, and how much of its input has come. */
+    writing?: { tool: string; bytes: number; at: number }
+  } = {},
+): Seg[] {
+  const { waited, writing } = extra
+  // A running call wins; a finished one holds the line only until something else starts.
+  const focus = focusOf(activity) ?? (writing === undefined ? heldFocusOf(activity, now) : undefined)
   const a = focus === undefined ? undefined : activity[focus]
   const cursor = (c: string): Seg => ({ t: '█', c: mix(c, FAINT, pulse(now, 1060)) })
   const shimmer = (text: string, c: string): Seg[] =>
@@ -932,7 +983,7 @@ export function statusLine(activity: Readonly<Record<string, Activity>>, turn: T
   if (a !== undefined && focus !== undefined) {
     const col = COLOR[a.op]
     const others = Object.values(activity).filter(x => x.running > 0).length - 1
-    const secs = `${(Math.max(0, now - a.startedAt) / 1000).toFixed(1)}s`
+    const secs = `${(Math.max(0, (a.running > 0 || a.endedAt === undefined ? now : a.endedAt) - a.startedAt) / 1000).toFixed(1)}s`
     const dir = parentOf(focus)
     const tail = ` ${secs}${others > 0 ? ` +${others}` : ''}`
     const room = columns - 2 - VERB[a.op].length - 1 - tail.length - 2 // '❯ ', the verb, a space, the tail, ' █'
@@ -949,8 +1000,171 @@ export function statusLine(activity: Readonly<Record<string, Activity>>, turn: T
       cursor(col),
     ]
   }
-  if (turn.phase === 'working') return [{ t: '❯ ', c: CLAUDE, b: true }, ...shimmer('thinking', MUTED), { t: ' ' }, cursor(MUTED)]
+  // A long tool call (a big Write, a whole note) takes a while to write before it runs.
+  if (writing !== undefined) {
+    const tail = ` ${sizeText(writing.bytes)} ${(Math.max(0, now - writing.at) / 1000).toFixed(1)}s`
+    const room = columns - 2 - 'writing'.length - 1 - tail.length - 2
+    return [
+      { t: '❯ ', c: CLAUDE, b: true },
+      ...shimmer('writing', CLAUDE),
+      { t: ' ' },
+      { t: truncate(toolName(writing.tool), room), c: BASE },
+      { t: tail, c: MUTED },
+      { t: ' ' },
+      cursor(CLAUDE),
+    ]
+  }
+  if (turn.phase === 'working') {
+    const secs: Seg[] = waited === undefined ? [] : [{ t: ` ${waited}s`, c: MUTED }]
+    return [{ t: '❯ ', c: CLAUDE, b: true }, ...shimmer('thinking', MUTED), ...secs, { t: ' ' }, cursor(MUTED)]
+  }
   return [{ t: '❯ ', c: MUTED }, { t: `idle · ${fileCount} files`, c: MUTED }, { t: ' ' }, cursor(MUTED)]
+}
+
+// ---------------------------------------------------------------- thinking
+
+const THOUGHT_KEEP = 24_000 // characters of a turn's thinking kept, for scrolling back
+const THOUGHT_ROWS_MIN = 4
+const THOUGHT_ROWS_MAX = 12
+const THOUGHT_SHARE = 0.3 // of the pane's height
+const TYPE_CPS = 35 // a reading pace, characters a second
+const TYPE_LATE = 3 // how much faster text is typed once the thought has ended
+const TYPE_LAG = 400 // characters behind the stream before typing speeds up
+
+/** The turn a thought key (`turn:step:block`) belongs to. */
+export const turnOf = (key: string) => key.split(':')[0] ?? key
+
+/**
+ * Appends a streamed piece of thinking. A new block in the same turn goes on under the
+ * last one, so the turn's thoughts can be read back; a new turn starts over.
+ */
+export function withThought(thought: Thought | null, key: string, piece: string, now: number): Thought {
+  const same = thought !== null && thought.key === key
+  const sameTurn = thought !== null && thought.text !== '' && turnOf(thought.key) === turnOf(key)
+  // Emoji can be two cells wide, so they are dropped like everywhere else in the pane.
+  const clean = piece.replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, '').replace(/\s+/g, ' ')
+  let joined: string
+  if (same) joined = thought.text.endsWith(' ') ? thought.text + clean.trimStart() : thought.text + clean
+  else if (sameTurn) joined = thought.text.trimEnd() + '\n\n' + clean.trimStart()
+  else joined = clean.trimStart()
+  const cut = Math.max(0, joined.length - THOUGHT_KEEP)
+  return { key, text: joined.slice(cut), dropped: (same || sameTurn ? thought.dropped : 0) + cut, at: now }
+}
+
+/** `reading` while the thought streams; `late` once it has ended and the text still has to catch up. */
+export type TypePace = 'reading' | 'late'
+
+/** Moves the typewriter on by `dt` ms at its pace, speeding up only once far behind. */
+export function typeTo(typed: number, total: number, dt: number, pace: TypePace = 'reading'): number {
+  if (typed >= total) return total
+  const rush = 1 + Math.max(0, total - typed - TYPE_LAG) / TYPE_LAG
+  const cps = TYPE_CPS * (pace === 'late' ? TYPE_LATE : 1)
+  return Math.min(total, typed + (cps * rush * dt) / 1000)
+}
+
+/** Greedy word wrap, a new line per paragraph; a word longer than the line is broken. */
+export function wrapWords(text: string, width: number): string[] {
+  if (text.includes('\n')) return text.split('\n').flatMap(p => (p === '' ? [''] : wrapWords(p, width)))
+  const lines: string[] = []
+  let line = ''
+  for (const word of text.split(' ')) {
+    let w = word
+    while (w.length > width) {
+      if (line !== '') lines.push(line)
+      line = ''
+      lines.push(w.slice(0, width))
+      w = w.slice(width)
+    }
+    if (line === '') line = w
+    else if (line.length + 1 + w.length <= width) line += ' ' + w
+    else {
+      lines.push(line)
+      line = w
+    }
+  }
+  if (line !== '') lines.push(line)
+  return lines
+}
+
+/** 0 while the thought is shown, rising to 1 as it fades out a while after the turn ends. */
+export function thoughtFade(thought: Thought | null, typed: number, now: number, turn: TurnInfo): number {
+  if (thought === null) return 1
+  const caughtUp = typed >= thought.dropped + thought.text.length
+  if (thought.endedAt === undefined || !caughtUp || turn.phase === 'working') return 0
+  return smooth((now - Math.max(thought.endedAt, turn.at) - T.thoughtLinger) / T.thoughtFade)
+}
+
+/** Rows the thinking section gets: a share of the pane's height, within limits. */
+export function thoughtRows(height: number): number {
+  return Math.max(THOUGHT_ROWS_MIN, Math.min(THOUGHT_ROWS_MAX, Math.floor(height * THOUGHT_SHARE)))
+}
+
+export type ThoughtScene = {
+  thought: Thought | null
+  typed: number
+  now: number
+  turn: TurnInfo
+  columns: number
+  rows: number
+  /** The first line shown while the person scrolls; absent follows the typing. */
+  top?: number
+}
+export type ThoughtView = {
+  lines: Seg[][]
+  top: number
+  above: number
+  below: number
+  fade: number
+  /** Seconds waited so far while no words have come; the section's rule shows them. */
+  waited?: number
+}
+
+/** The thought typed up to `typed`, word-wrapped, `rows` lines of it, the cursor at its edge. */
+export function thoughtView(scene: ThoughtScene): ThoughtView {
+  const { thought, typed, now, turn, columns, rows, top } = scene
+  const fade = top === undefined ? thoughtFade(thought, typed, now, turn) : 0
+  const none = { lines: [], top: 0, above: 0, below: 0, fade: 1 }
+  if (thought === null) return none
+  // Thinking text comes late, or never without `showThinkingSummaries`: a line of dots holds
+  // its place, under the turn's earlier thoughts so they stay readable meanwhile.
+  if (thought.waitingSince !== undefined) {
+    // A wave of dots rather than a word: the prompt line and the rule already say thinking.
+    const dots = '• • • • •'
+    const wave = (i: number) => band(i, ((now / 90) % (dots.length + 6)) - 3, 2.5)
+    const waited = Math.floor(Math.max(0, now - thought.waitingSince) / 1000)
+    const dotLine: Seg[] = [{ t: ' ' }, ...paint(dots, i => ({ c: mix(FAINT, CLAUDE, wave(i)) }))]
+    if (thought.text === '' || rows < 2) return { ...none, fade: 0, waited, lines: [dotLine] }
+    const { waitingSince: _, ...settled } = thought
+    const before = thoughtView({ ...scene, thought: settled, rows: rows - 1, turn: { ...turn, phase: 'working' } })
+    return { ...before, fade: 0, waited, lines: [...before.lines, dotLine] }
+  }
+  if (thought.text === '' || fade >= 1) return none
+  const total = thought.dropped + thought.text.length
+  const isTyping = thought.endedAt === undefined || typed < total
+  const shown = thought.text.slice(0, Math.max(0, Math.floor(typed) - thought.dropped))
+  const all = wrapWords(shown, Math.max(1, columns - 2))
+  if (all.length === 0) all.push('')
+  // One row stays empty under the last line, apart from what follows.
+  const room = rows > 1 ? rows - 1 : rows
+  const last = Math.max(0, all.length - room)
+  const first = top === undefined ? last : Math.min(top, last)
+  const lines = all.slice(first, first + room)
+  const faded = (c: string) => mix(c, FAINT, fade)
+  const segs = lines.map((text, i) => {
+    const isEdge = first + i === all.length - 1 && isTyping
+    // Older lines dim a little, so the eye finds the newest.
+    const tone = top === undefined ? mix(MUTED, BASE, 0.35 + (0.65 * (i + 1)) / lines.length) : BASE
+    const row: Seg[] = [{ t: ' ' }]
+    row.push(...paint(text, (j, n) => {
+      const edge = n - j
+      const lit = isEdge && edge <= 3 ? mix('#ffffff', tone, (edge - 1) / 3) : tone
+      return { c: faded(lit) }
+    }))
+    if (isEdge) row.push({ t: '▏', c: mix(CLAUDE, FAINT, pulse(now, 1060)) })
+    return row
+  })
+  if (room < rows) segs.push([])
+  return { lines: segs, top: first, above: first, below: all.length - first - lines.length, fade }
 }
 
 export function legendLines(columns: number): Seg[][] {

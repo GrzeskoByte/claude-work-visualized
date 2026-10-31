@@ -43,6 +43,22 @@ export type Clip = {
   changed: number[]
 }
 
+/** The turn's thinking so far: each block a paragraph, the one streaming now last. */
+export type Thought = {
+  /** The block streaming now (`turn:step:block`): a new turn starts the text over. */
+  key: string
+  /** Whitespace collapsed to single spaces, blocks separated by `\n`; only the tail is kept. */
+  text: string
+  /** Characters cut from the front of `text` to keep it short. */
+  dropped: number
+  /** When the last piece arrived. */
+  at: number
+  /** Absent while the block is still streaming. */
+  endedAt?: number
+  /** When the model request now streaming began, while no words of its thinking have come. */
+  waitingSince?: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'work-visualized': {
@@ -52,6 +68,7 @@ declare module 'claude-code' {
       turn: TurnInfo
       watching: boolean
       clips: Clip[]
+      thought: Thought | null
     }
   }
 }

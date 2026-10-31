@@ -82,6 +82,21 @@ A deleted folder shows as a single fading row instead of one row per file inside
   - thinking: `❯ thinking █`
   - idle: `❯ idle · N files █`
   - The block cursor always blinks.
+- **Thinking:** while Claude thinks, a `── thinking ──` section under the prompt line types the
+  thought out at a reading pace of 35 characters a second. It only speeds up once it is more than
+  400 characters behind the stream, or to 3 times the pace once the thought has ended. Until the
+  first words arrive, from the moment a model request starts, the section shows a wave of dots
+  `• • • • •` and the prompt line counts the seconds, `❯ thinking 4s █`. The word is shown once:
+  while the prompt line says thinking the section has no title (only `↑N` / `↓N` when scrolled),
+  and while Claude does something else the section is titled `── thinking ──`. A request that turns out not to think puts the last
+  thought back. Whitespace is collapsed, older lines are dimmer and the newest
+  letters bright at a blinking `▏` cursor. The section is 30 % of the pane's height, 4 to 12 lines,
+  with `↑N` / `↓N` for lines out of view. The wheel over the section scrolls the
+  thought; it stays where you left it for 20 s, or until you scroll back to the end. Each new
+  thinking block in a turn goes on as a new paragraph under the last, and the dots that wait for
+  the next one sit under what was thought so far, so nothing is taken away mid-turn: the whole
+  turn's thinking (the last 24,000 characters) can be scrolled back through. It stays for the
+  whole turn and 20 s after it, then fades over 1.5 s. A new turn starts it over.
 - **Section rules:** `── tree ──` (with `↑N` when scrolled) and `── legend ──`.
 - **Completion card:** a rounded box whose border fades in. `✓ TASK COMPLETE` appears letter by
   letter, then one row per operation slides in about 120 ms apart, its count and `━━━` bar
