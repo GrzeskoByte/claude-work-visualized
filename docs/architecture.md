@@ -84,13 +84,16 @@ Commands are split outside quotes, and a heredoc's body is kept apart from the c
 `web1:/etc/hosts`, or `web1:/~/notes.md` for one under the remote home. Remote paths can't be
 checked against a scan, so every one counts. The rescan leaves them in the tree, and a remote
 delete becomes a ghost as soon as the command succeeds.
+
 ## Code view
 
 `hooks/code.ts` replays each `Edit`, `MultiEdit` and `Write` in the pane. The line diff and the
 replay follow [Code Viz](https://github.com/Waterside-Group/code-viz)'s viewer (MIT).
 
 1. **Before the tool runs**, the `tool.call` hook reads the file (empty for a new one), skipping
-   files over 256 KB.
+   files over 256 KB. For a shell command that is up to 4 files: those it writes (`sed -i`, `>`,
+   `tee`), then those `mentionsOf()` finds named anywhere in it, a heredoc's quoted strings
+   included. They are replayed even when a later step of the command fails.
 2. **After it succeeds**, the file is read again from disk, so a formatter's changes show too.
    `clipOf()` diffs the two (Myers), keeps a window of up to 80 lines with 3 lines of context
    around the changed regions, and stores it as a clip in `clips`.

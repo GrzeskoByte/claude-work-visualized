@@ -25,7 +25,8 @@ deletes it, so you can see at a glance where Claude is working right now.
   tree under a folder per host (`deploy@web1:/etc/nginx/…`, `~` for the remote home), heredoc
   scripts and `for` loops included. While Claude works on a host, the header names it:
   `work-map ~/project → deploy@web1`.
-- **Code view:** each `Edit` and `Write` is replayed as keystrokes next to the tree: replaced
+- **Code view:** each `Edit` and `Write`, and each file a shell command changes (`sed -i`, `>`,
+  `tee`, or a script that rewrites a file it names), is replayed as keystrokes next to the tree: replaced
   lines turn red and fold away, new lines type in behind a caret, small changes are selected,
   backspaced and retyped in place, and gutter marks stay for a while after. Long lines wrap, the
   view scrolls smoothly to the caret, and code is highlighted per language (about 60, through
@@ -193,8 +194,8 @@ claude-work-visualized/
   completion card counts only what Claude's own tool calls changed.
 - **Skipped folders:** `node_modules`, `.git`, `dist`, `build`, caches and virtual environments
   are left out of the tree.
-- **Code view:** only `Edit`, `MultiEdit` and `Write` are replayed; a file changed through a
-  shell command shows in the tree only. Files over 256 KB are skipped, and one replay shows at
+- **Code view:** a shell command's change is replayed only for files the command names, up to 4
+  per command; a script that changes files it doesn't name shows in the tree only. Files over 256 KB are skipped, and one replay shows at
   most 80 lines.
 - **Size limit:** a scan covers at most 2,000 entries, 12 levels deep.
 - **Colours:** tuned for dark terminal themes.
