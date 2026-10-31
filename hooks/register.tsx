@@ -6,7 +6,7 @@ import { MAX_BYTES, clipOf, codeLines, codeRule, currentClip, enqueue, isClipDon
 import {
   COLOR, FAINT, ICON, IGNORED, LABEL, MUTED, T,
   buildRows, classifyBash, counted, diffTrees, emptyTurn, focusOf, headerLine, isAnimating, isUnscanned, legendLines, mix, remoteOf,
-  placeOf, remotePath, scrollTo, staleKeys, statusLine, summaryLines, withPath, withoutPath,
+  placeOf, relPath, remotePath, scrollTo, staleKeys, statusLine, summaryLines, withPath, withoutPath,
 } from './model'
 import type { FolderMemory, Seg, Target } from './model'
 
@@ -35,6 +35,7 @@ let scroll = 0
 let codeScroll = 0
 let animateUntil = 0
 let isWatching = true // mirrors the watching atom for synchronous checks
+let chatDiffs: ChatDiffs = 'quiet'
 let home: string | undefined
 let scanning: Promise<unknown> = Promise.resolve()
 let lastListed: ReadonlySet<string> = new Set() // folders the last scan listed in full
@@ -71,17 +72,18 @@ async function scanTree($: EngineInterface): Promise<{ entries: TreeEntry[]; lis
   return { entries: out, listed }
 }
 
-/** Rescans the project and animates whatever changed that no tool call named. */
 /** Why a rescan runs: right after a tool call that can change files, or the timer and other upkeep. */
 type ScanCause = 'tool' | 'poll'
 
+/** Rescans the project and animates whatever changed that no tool call named. */
 function rescan($: EngineInterface, claimed: ReadonlySet<string>, cause: ScanCause): Promise<unknown> {
   scanning = scanning.then(async () => {
     // Claude's doing: after its tool call, or while one still runs (a long build).
     const isClaudes = cause === 'tool' || changingCalls > 0
     const scan = await scanTree($)
     const fresh = scan.entries
-    const before = await read($, tree)
+    // Remote paths come from commands, not the scan, so they are kept as they are.
+    const before = (await read($, tree)).filter(t => !isUnscanned(t.p))
     const now = await $.clock.now()
     const diff = diffTrees(before, fresh, { before: lastListed, after: scan.listed })
     lastListed = scan.listed
@@ -358,6 +360,9 @@ export const register: Register = on => {
       if (first) setStatus($, `${ICON[first.op]} ${LABEL[first.op]} ${first.path}`)
     }
 
+    const edited = EDITORS.has(tool) ? targets.find(t => t.file !== undefined) : undefined
+    const before = edited?.file === undefined ? undefined : await textBefore($, edited.file, edited)
+
     if (mutates) changingCalls++
     const ran = await next(e).finally(() => {
       if (mutates) changingCalls--
@@ -391,9 +396,9 @@ export const register: Register = on => {
       const left = await read($, activity)
       if (focusOf(left) === undefined) setStatus($, undefined)
     }
-    if (!failed && edited !== undefined && before !== undefined) {
+    if (!failed && edited?.file !== undefined && before !== undefined) {
       // Read back from disk, so a formatter's changes show as well.
-      const after = await $.fs.read(filePath as string).catch(() => undefined)
+      const after = await $.fs.read(edited.file).catch(() => undefined)
       const clip = after === undefined ? undefined : clipOf(edited.path, before, after, endedAt)
       if (clip !== undefined) await update($, clips, list => enqueue(list, clip, endedAt))
     }
@@ -479,7 +484,7 @@ export const register: Register = on => {
 
       return (
         <Box flexDirection="column" width={columns} flexGrow={1} backgroundColor={PANE_BG}>
-          {line(headerLine(now, focus !== undefined || info.phase === 'working', root), 'h')}
+          {line(headerLine(now, focus !== undefined || info.phase === 'working', root, remoteOf(act, now)), 'h')}
           {line(statusLine(act, info, now, fileCount, columns), 's')}
           {rule(above > 0 ? `tree ↑${above}` : 'tree', 'r1')}
           {rows.length === 0 ? line([{ t: ' scanning…', c: MUTED }], 'empty') : visible.map(r => line(r.segs, r.key))}
